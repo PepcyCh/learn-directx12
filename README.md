@@ -10,7 +10,7 @@ Use CMake to build.
   * [x] chap. 1 - vector
   * [x] chap. 2 - matrix
   * [x] chap. 3 - transformation
-* [x] Part 2 - D3D Foundation
+* [ ] Part 2 - D3D Foundation
   * [x] chap. 4 - initialization
   * [x] chap. 5 - rendering pipeline
   * [x] chap. 6 - drawing I
