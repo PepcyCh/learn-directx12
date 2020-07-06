@@ -8,6 +8,8 @@
 #include "d3dx12.h"
 #include "D3DUtil.h"
 
+using Microsoft::WRL::ComPtr;
+
 LRESULT CALLBACK
 MainWndProc(HWND win, UINT msg, WPARAM w_param, LPARAM l_param) {
     return D3DApp::GetApp()->MsgProc(win, msg, w_param, l_param);
@@ -212,7 +214,7 @@ bool D3DApp::InitWindow() {
 bool D3DApp::InitDirect3D() {
     // debug layer
 #if defined(DEBUG) || defined(_DEBUG)
-    WRL::ComPtr<ID3D12Debug> p_dbg_controller;
+    ComPtr<ID3D12Debug> p_dbg_controller;
     ThrowIfFailed(D3D12GetDebugInterface(IID_PPV_ARGS(&p_dbg_controller)));
     p_dbg_controller->EnableDebugLayer();
 #endif
@@ -224,7 +226,7 @@ bool D3DApp::InitDirect3D() {
     D3D_FEATURE_LEVEL d3d_feature = D3D_FEATURE_LEVEL_12_0;
     HRESULT hr_hardware = D3D12CreateDevice(nullptr, d3d_feature, IID_PPV_ARGS(&p_device));
     if (FAILED(hr_hardware)) {
-        WRL::ComPtr<IDXGIAdapter> p_warp_adapter;
+        ComPtr<IDXGIAdapter> p_warp_adapter;
         ThrowIfFailed(p_dxgi_factory->EnumWarpAdapter(IID_PPV_ARGS(&p_warp_adapter)));
         ThrowIfFailed(D3D12CreateDevice(p_warp_adapter.Get(), d3d_feature, IID_PPV_ARGS(&p_device)));
         MessageBox(nullptr, L"warp adapter", nullptr, 0);

@@ -1,9 +1,9 @@
-add_executable(${PROJECT_NAME}
-    main.cpp
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/defines.h.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/defines.h
 )
 
-add_subdirectory(D3DCommon)
+add_subdirectory(Common)
 
-target_link_libraries(${PROJECT_NAME}
-    PUBLIC d3d_common
-)
+add_subdirectory(ch04_init)
+add_subdirectory(ch06_box)

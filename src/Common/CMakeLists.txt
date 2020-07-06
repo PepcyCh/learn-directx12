@@ -1,5 +1,6 @@
 add_library(d3d_common
     D3DApp.cpp
+    D3DUtil.cpp
     Timer.cpp
 )
 

@@ -1,0 +1,6 @@
+#pragma once
+
+#include <string>
+
+const std::wstring root_path = L"${PROJECT_SOURCE_DIR}/";
+const std::wstring src_path = root_path + L"src/";

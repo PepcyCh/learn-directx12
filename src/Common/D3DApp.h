@@ -14,8 +14,6 @@
 
 #include "Timer.h"
 
-using namespace Microsoft;
-
 class D3DApp {
   public:
     D3DApp(const D3DApp &rhs) = delete;
@@ -72,26 +70,26 @@ class D3DApp {
     bool resizing = false;
     bool full_screen_state = false;
 
-    WRL::ComPtr<IDXGIFactory4> p_dxgi_factory;
-    WRL::ComPtr<IDXGISwapChain1> p_swap_chain;
-    WRL::ComPtr<ID3D12Device> p_device;
+    Microsoft::WRL::ComPtr<IDXGIFactory4> p_dxgi_factory;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1> p_swap_chain;
+    Microsoft::WRL::ComPtr<ID3D12Device> p_device;
 
-    WRL::ComPtr<ID3D12Fence> p_fence;
+    Microsoft::WRL::ComPtr<ID3D12Fence> p_fence;
     UINT64 curr_fence;
 
-    WRL::ComPtr<ID3D12CommandQueue> p_cmd_queue;
-    WRL::ComPtr<ID3D12CommandAllocator> p_cmd_allocator;
-    WRL::ComPtr<ID3D12GraphicsCommandList> p_cmd_list;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> p_cmd_queue;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> p_cmd_allocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> p_cmd_list;
 
     static const int kSwapChainBufferCnt = 2;
     int curr_back_buffer = 0;
-    WRL::ComPtr<ID3D12Resource> swap_chain_buffers[kSwapChainBufferCnt];
-    WRL::ComPtr<ID3D12Resource> depth_stencil_buffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> swap_chain_buffers[kSwapChainBufferCnt];
+    Microsoft::WRL::ComPtr<ID3D12Resource> depth_stencil_buffer;
     DXGI_FORMAT back_buffer_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     DXGI_FORMAT depth_stencil_fmt = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
-    WRL::ComPtr<ID3D12DescriptorHeap> p_rtv_heap;
-    WRL::ComPtr<ID3D12DescriptorHeap> p_dsv_heap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> p_rtv_heap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> p_dsv_heap;
     UINT rtv_descriptor_size = 0;
     UINT dsv_descriptor_size = 0;
     UINT cbv_srv_uav_descriptor_size = 0;
