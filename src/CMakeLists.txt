@@ -7,3 +7,4 @@ add_subdirectory(Common)
 
 add_subdirectory(ch04_init)
 add_subdirectory(ch06_box)
+add_subdirectory(ch06_box_extra)
