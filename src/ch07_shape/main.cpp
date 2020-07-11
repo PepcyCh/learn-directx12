@@ -30,8 +30,6 @@ struct RenderItem {
 // when GPU is processing the commands created via a frame resource's data,
 // CPU can still modify data in the other frame resources
 // in this way, CPU and GPU can work simultaneously
-//
-// Cylinder() may have a bug now: only two caps can be seen (even without face-culling)
 
 class D3DAppShape : public D3DApp {
   public:
@@ -251,7 +249,7 @@ class D3DAppShape : public D3DApp {
     }
     void BuildCBV() {
         UINT obj_cb_size = D3DUtil::CBSize(sizeof(ObjectConst));
-        UINT n_obj = opaque_items.size();
+        int n_obj = opaque_items.size();
 
         // per object cbv
         for (int fr_ind = 0; fr_ind < n_frame_resource; fr_ind++) {

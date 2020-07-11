@@ -120,7 +120,7 @@ GeometryGenerator::Sphere(float radius, int n_slice, int n_stack) {
             mesh.indices32.push_back(base + (i + 1) * n_ring + j);
         }
     }
-    uint32_t bottom_i = mesh.vertices.size() - 1;
+    uint32_t bottom_i = (uint32_t) mesh.vertices.size() - 1;
     base = bottom_i - n_ring;
     for (int i = 0; i < n_slice; i++) {
         mesh.indices32.push_back(bottom_i);
@@ -138,21 +138,21 @@ GeometryGenerator::Geosphere(float radius, int n_subdiv) {
     // X^2 + Z^2 = 1
     // Z / X = (sqrt(5) + 1) / 2
     const float X = 0.525731f;
-	const float Z = 0.850651f;
-	XMFLOAT3 pos[12] = {
-		XMFLOAT3(-X, 0.0f, Z),  XMFLOAT3(X, 0.0f, Z),  
-		XMFLOAT3(-X, 0.0f, -Z), XMFLOAT3(X, 0.0f, -Z),    
-		XMFLOAT3(0.0f, Z, X),   XMFLOAT3(0.0f, Z, -X), 
-		XMFLOAT3(0.0f, -Z, X),  XMFLOAT3(0.0f, -Z, -X),    
-		XMFLOAT3(Z, X, 0.0f),   XMFLOAT3(-Z, X, 0.0f), 
-		XMFLOAT3(Z, -X, 0.0f),  XMFLOAT3(-Z, -X, 0.0f)
-	};
+    const float Z = 0.850651f;
+    XMFLOAT3 pos[12] = {
+        XMFLOAT3(-X, 0.0f, Z),  XMFLOAT3(X, 0.0f, Z),  
+        XMFLOAT3(-X, 0.0f, -Z), XMFLOAT3(X, 0.0f, -Z),    
+        XMFLOAT3(0.0f, Z, X),   XMFLOAT3(0.0f, Z, -X), 
+        XMFLOAT3(0.0f, -Z, X),  XMFLOAT3(0.0f, -Z, -X),    
+        XMFLOAT3(Z, X, 0.0f),   XMFLOAT3(-Z, X, 0.0f), 
+        XMFLOAT3(Z, -X, 0.0f),  XMFLOAT3(-Z, -X, 0.0f)
+    };
     uint32_t ind[60] = {
-		1, 4, 0,  4, 9, 0,  4, 5, 9,  8, 5, 4,  1, 8, 4,    
-		1, 10, 8, 10, 3, 8, 8, 3, 5,  3, 2, 5,  3, 7, 2,    
-		3, 10, 7, 10, 6, 7, 6, 11, 7, 6, 0, 11, 6, 1, 0, 
-		10, 1, 6, 11, 0, 9, 2, 11, 9, 5, 2, 9,  11, 2, 7 
-	};
+        1, 4, 0,  4, 9, 0,  4, 5, 9,  8, 5, 4,  1, 8, 4,    
+        1, 10, 8, 10, 3, 8, 8, 3, 5,  3, 2, 5,  3, 7, 2,    
+        3, 10, 7, 10, 6, 7, 6, 11, 7, 6, 0, 11, 6, 1, 0, 
+        10, 1, 6, 11, 0, 9, 2, 11, 9, 5, 2, 9,  11, 2, 7 
+    };
     mesh.indices32.assign(ind, ind + 60);
 
     mesh.vertices.resize(12);
@@ -196,8 +196,9 @@ GeometryGenerator::Cylinder(float bottom_radius, float top_radius, float h, int 
     for (int i = 0; i <= n_stack; i++) {
         float y = -0.5f * h + dh * i;
         float r = bottom_radius + dr * i;
-        float theta = XM_2PI / n_slice;
+        float dtheta = XM_2PI / n_slice;
         for (int j = 0; j <= n_slice; j++) {
+            float theta = dtheta * j;
             float s = std::sin(theta);
             float c = std::cos(theta);
             
@@ -222,11 +223,11 @@ GeometryGenerator::Cylinder(float bottom_radius, float top_radius, float h, int 
     for (int i = 0; i < n_stack; i++) {
         for (int j = 0; j < n_slice; j++) {
             mesh.indices32.push_back(i * n_ring + j);
-            mesh.indices32.push_back(i * n_ring + j + 1);
+            mesh.indices32.push_back((i + 1) * n_ring + j);
             mesh.indices32.push_back((i + 1) * n_ring + j + 1);
             mesh.indices32.push_back(i * n_ring + j);
             mesh.indices32.push_back((i + 1) * n_ring + j + 1);
-            mesh.indices32.push_back((i + 1) * n_ring + j);
+            mesh.indices32.push_back(i * n_ring + j + 1);
         }
     }
 
@@ -308,7 +309,7 @@ void GeometryGenerator::Subdivide(MeshData &mesh) {
     mesh.vertices.clear();
     mesh.indices32.clear();
 
-    int n_tri = copy.indices32.size() / 3;
+    int n_tri = (int) copy.indices32.size() / 3;
     for (int i = 0; i < n_tri; i++) {
         Vertex v0 = copy.vertices[copy.indices32[i * 3]];
         Vertex v1 = copy.vertices[copy.indices32[i * 3 + 1]];
@@ -364,7 +365,7 @@ GeometryGenerator::Vertex GeometryGenerator::Midpoint(const Vertex &v0, const Ve
 
 void GeometryGenerator::BuildCylinderBottomCap(float br, float tr, float h, int n_slice, int n_stack,
         MeshData &mesh) {
-    uint32_t base = mesh.vertices.size();
+    uint32_t base = (uint32_t) mesh.vertices.size();
     float dtheta = XM_2PI / n_slice;
     float y = -h * 0.5f;
     for (int i = 0; i <= n_slice; i++) {
@@ -376,7 +377,7 @@ void GeometryGenerator::BuildCylinderBottomCap(float br, float tr, float h, int 
         mesh.vertices.emplace_back(x, y, z, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, u, v);
     }
     mesh.vertices.emplace_back(0.0f, y, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.5f);
-    uint32_t center = mesh.vertices.size() - 1;
+    uint32_t center = (uint32_t) mesh.vertices.size() - 1;
     for (int i = 0; i < n_slice; i++) {
         mesh.indices32.push_back(center);
         mesh.indices32.push_back(base + i);
@@ -386,19 +387,19 @@ void GeometryGenerator::BuildCylinderBottomCap(float br, float tr, float h, int 
 
 void GeometryGenerator::BuildCylinderTopCap(float br, float tr, float h, int n_slice, int n_stack,
         MeshData &mesh) {
-    uint32_t base = mesh.vertices.size();
+    uint32_t base = (uint32_t) mesh.vertices.size();
     float dtheta = XM_2PI / n_slice;
     float y = h * 0.5f;
     for (int i = 0; i <= n_slice; i++) {
         float theta = dtheta * i;
-        float x = br * std::cos(theta);
-        float z = br * std::sin(theta);
+        float x = tr * std::cos(theta);
+        float z = tr * std::sin(theta);
         float u = x / h + 0.5f;
         float v = z / h + 0.5f;
         mesh.vertices.emplace_back(x, y, z, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, u, v);
     }
     mesh.vertices.emplace_back(0.0f, y, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.5f);
-    uint32_t center = mesh.vertices.size() - 1;
+    uint32_t center = (uint32_t) mesh.vertices.size() - 1;
     for (int i = 0; i < n_slice; i++) {
         mesh.indices32.push_back(center);
         mesh.indices32.push_back(base + i + 1);
