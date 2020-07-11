@@ -78,7 +78,8 @@ class D3DAppBoxExtra : public D3DApp {
         XMMATRIX _project = XMLoadFloat4x4(&project);
         XMMATRIX mvp_mat = _model * _view * _project;
         CBObject obj_const;
-        // XMMATRIX is column-major, but XMFLOAT is row-major, therefore XMMatrixTranspose is needed
+        // XMMATRIX / XMFLOAT4X4 is row-majar, but hlsl matrix is column-major
+        // therefore XMMatrixTranspose is needed
         XMStoreFloat4x4(&obj_const.mvp_mat, XMMatrixTranspose(mvp_mat));
 
         p_cbobj->CopyData(0, obj_const);
