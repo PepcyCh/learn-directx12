@@ -14,7 +14,7 @@ Use CMake to build.
   * [x] chap. 4 - initialization
   * [x] chap. 5 - rendering pipeline
   * [x] chap. 6 - drawing I
-  * [ ] chap. 7 - drawing II
+  * [x] chap. 7 - drawing II
   * [ ] chap. 8 - lighting
   * [ ] chap. 9 - texturing
   * [ ] chap. 10 -blending
