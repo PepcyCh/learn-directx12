@@ -15,7 +15,7 @@ using namespace DirectX;
 const int n_frame_resource = 3;
 
 struct RenderItem {
-    DirectX::XMFLOAT4X4 model = DXMath::Identity4x4();
+    XMFLOAT4X4 model = DXMath::Identity4x4();
     int n_frame_dirty = n_frame_resource;
     UINT obj_cb_ind = -1;
     MeshGeometry *geo = nullptr;
@@ -253,7 +253,7 @@ class D3DAppShape : public D3DApp {
 
         // per object cbv
         for (int fr_ind = 0; fr_ind < n_frame_resource; fr_ind++) {
-            auto obj_cb = frame_resources[fr_ind]->p_obj_cb->Resouce();
+            auto obj_cb = frame_resources[fr_ind]->p_obj_cb->Resource();
             for (int i = 0; i < n_obj; i++) {
                 D3D12_GPU_VIRTUAL_ADDRESS cb_addr = obj_cb->GetGPUVirtualAddress();
                 cb_addr += i * obj_cb_size;
@@ -270,7 +270,7 @@ class D3DAppShape : public D3DApp {
         // per pass cbv
         UINT pass_cb_size = D3DUtil::CBSize(sizeof(PassConst));
         for (int fr_ind = 0; fr_ind < n_frame_resource; fr_ind++) {
-            auto pass_cb = frame_resources[fr_ind]->p_pass_cb->Resouce();
+            auto pass_cb = frame_resources[fr_ind]->p_pass_cb->Resource();
             D3D12_GPU_VIRTUAL_ADDRESS cb_addr = pass_cb->GetGPUVirtualAddress();
             auto h_pass_cbv = CD3DX12_CPU_DESCRIPTOR_HANDLE(p_cbv_heap->GetCPUDescriptorHandleForHeapStart(),
                 pass_cbv_offset + fr_ind, cbv_srv_uav_descriptor_size);

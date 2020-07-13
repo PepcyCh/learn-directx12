@@ -184,7 +184,7 @@ class D3DAppBoxExtra : public D3DApp {
         // 'bind' upload buffer's mapped resource and cbv's buffer location
         UINT cb_size = D3DUtil::CBSize(sizeof(CBObject));
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc;
-        cbv_desc.BufferLocation = p_cbobj->Resouce()->GetGPUVirtualAddress();
+        cbv_desc.BufferLocation = p_cbobj->Resource()->GetGPUVirtualAddress();
         cbv_desc.SizeInBytes = cb_size;
         p_device->CreateConstantBufferView(&cbv_desc, p_cbv_heap->GetCPUDescriptorHandleForHeapStart());
     }

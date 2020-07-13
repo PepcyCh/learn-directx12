@@ -27,7 +27,7 @@ class UploadBuffer {
         upload_buf = nullptr;
     }
 
-    ID3D12Resource *Resouce() const {
+    ID3D12Resource *Resource() const {
         return upload_buf.Get();
     }
 
