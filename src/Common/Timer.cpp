@@ -53,7 +53,7 @@ void Timer::Tick() {
     }
 
     QueryPerformanceCounter((LARGE_INTEGER *) &curr_time);
-    delta_time += (curr_time - prev_time) * sec_per_cnt;
+    delta_time = (curr_time - prev_time) * sec_per_cnt;
     prev_time = curr_time;
     if (delta_time < 0) {
         delta_time = 0;

@@ -35,8 +35,8 @@ ComPtr<ID3DBlob> D3DUtil::CompileShader(const std::wstring &filename,
     ComPtr<ID3DBlob> code = nullptr;
     ComPtr<ID3DBlob> errors;
 
-    hr = D3DCompileFromFile(filename.c_str(), defines, nullptr, entry.c_str(), target.c_str(),
-        compile_flag, 0, &code, &errors);
+    hr = D3DCompileFromFile(filename.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        entry.c_str(), target.c_str(), compile_flag, 0, &code, &errors);
 
     if (errors != nullptr) {
         OutputDebugStringA((char *) errors->GetBufferPointer());

@@ -34,6 +34,15 @@ class DXMath {
         return rnd_real(rnd_gen);
     }
 
+    static DirectX::XMVECTOR Spherical2Cartesian(float radius, float theta, float phi) {
+        return DirectX::XMVectorSet(
+            radius * std::sin(phi) * std::cos(theta),
+            radius * std::cos(phi),
+            radius * std::sin(phi) * std::sin(theta),
+            1.0f
+        );
+    }
+
   private:
     inline static bool rnd_init = false;
     inline static std::random_device rnd_dv;

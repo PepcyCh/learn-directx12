@@ -14,6 +14,7 @@
 #include <DirectXCollision.h>
 
 #include "d3dx12.h"
+#include "DXMath.h"
 
 class D3DUtil {
   public:
@@ -86,6 +87,44 @@ class DxException {
     std::wstring fn_name;
     std::wstring file_name;
     int lineno = -1;
+};
+
+// hlsl bind 4 continues float to a float4 (in a register)
+// and data in the same vector won't be splitted
+// { float3, float, float3, float, float3, float } - 3 float4
+// { float3, float3, float3, float, float, float } - 4 float4
+//
+// falloff: instead of using 1 / d^2 as attenuation, use linear function between falloff_start and falloff_end:
+
+// directional/point/spot light
+struct Light {
+    DirectX::XMFLOAT3 strength = { 0.5f, 0.5f, 0.5f };
+    float falloff_start = 1.0f; // point/spot
+    DirectX::XMFLOAT3 direction = { 0.0f, -1.0f, 0.0f }; // directional/spot
+    float falloff_end = 10.0f; // point/spot
+    DirectX::XMFLOAT3 position = { 0.0f, 0.0f, 0.0f }; // point/spot
+    float spot_power = 64.0f; // spot
+};
+
+const int MAX_N_LIGHT = 16;
+
+struct MaterialConst {
+    DirectX::XMFLOAT4 albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+    DirectX::XMFLOAT3 fresnel_r0 = { 0.01f, 0.01f, 0.01f };
+    float roughness = 0.25f;
+    DirectX::XMFLOAT4X4 mat_transform = DXMath::Identity4x4();
+};
+
+struct Material {
+    std::string name;
+    int mat_cb_ind = -1;
+    int diffuse_srv_heap_index = -1;
+    int normal_srv_heap_index = -1;
+    int n_frame_dirty = 0;
+    DirectX::XMFLOAT4 albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+    DirectX::XMFLOAT3 fresnel_r0 = { 0.01f, 0.01f, 0.01f };
+    float roughness = 0.25f;
+    DirectX::XMFLOAT4X4 mat_transform = DXMath::Identity4x4();
 };
 
 inline std::wstring AnsiToWString(const std::string &str) {

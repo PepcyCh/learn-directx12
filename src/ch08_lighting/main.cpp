@@ -20,6 +20,7 @@ struct RenderItem {
     int n_frame_dirty = n_frame_resource;
     UINT obj_cb_ind = -1;
     MeshGeometry *geo = nullptr;
+    Material *mat = nullptr;
     D3D12_PRIMITIVE_TOPOLOGY prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     UINT n_index = 0;
     UINT start_index = 0;
@@ -31,12 +32,12 @@ enum class RenderLayor : size_t {
     Count
 };
 
-// use root descriptors instead of descriptor tables in root signature
+// always remember that constant buffer is 128-bit aligned
 
-class D3DAppLandWave : public D3DApp {
+class D3DAppLighting : public D3DApp {
   public:
-    D3DAppLandWave(HINSTANCE h_inst) : D3DApp(h_inst) {}
-    ~D3DAppLandWave() {
+    D3DAppLighting(HINSTANCE h_inst) : D3DApp(h_inst) {}
+    ~D3DAppLighting() {
         if (p_device != nullptr) {
             FlushCommandQueue();
         }
@@ -55,6 +56,7 @@ class D3DAppLandWave : public D3DApp {
         BuildShaderAndInputLayout();
         BuildLandGeometry();
         BuildWaveGeometryBuffers();
+        BuildMaterials();
         BuildRenderItems();
         BuildFrameResources();
         BuildPSOs();
@@ -70,7 +72,7 @@ class D3DAppLandWave : public D3DApp {
   private:
     void OnResize() override {
         D3DApp::OnResize();
-        XMMATRIX _proj = XMMatrixPerspectiveFovRH(XM_PIDIV4, Aspect(), 0.1f, 100.0f);
+        XMMATRIX _proj = XMMatrixPerspectiveFovRH(XM_PIDIV4, Aspect(), 0.1f, 1000.0f);
         XMStoreFloat4x4(&proj, _proj);
     }
     void Update(const Timer &timer) override {
@@ -90,16 +92,13 @@ class D3DAppLandWave : public D3DApp {
         UpdateWaves(timer);
         UpdateObjCont(timer);
         UpdatePassConst(timer);
+        UpdateMaterialConst(timer);
     }
     void Draw(const Timer &timer) override {
         // reset cmd list and cmd alloc
         auto cmd_alloc = curr_fr->p_cmd_alloc;
         ThrowIfFailed(cmd_alloc->Reset());
-        if (wire_frame) {
-            ThrowIfFailed(p_cmd_list->Reset(cmd_alloc.Get(), psos["opaque_wf"].Get()));
-        } else {
-            ThrowIfFailed(p_cmd_list->Reset(cmd_alloc.Get(), psos["opaque"].Get()));
-        }
+        ThrowIfFailed(p_cmd_list->Reset(cmd_alloc.Get(), psos["opaque"].Get()));
 
         // viewport and scissor
         p_cmd_list->RSSetViewports(1, &viewport);
@@ -120,7 +119,7 @@ class D3DAppLandWave : public D3DApp {
         p_cmd_list->SetGraphicsRootSignature(p_rt_sig.Get());
         // set per pass cbv
         auto pass_cb = curr_fr->p_pass_cb->Resource();
-        p_cmd_list->SetGraphicsRootConstantBufferView(1, pass_cb->GetGPUVirtualAddress());
+        p_cmd_list->SetGraphicsRootConstantBufferView(2, pass_cb->GetGPUVirtualAddress());
 
         // draw items
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Opaque]);
@@ -157,10 +156,10 @@ class D3DAppLandWave : public D3DApp {
             phi += dy;
             phi = std::clamp(phi, 0.1f, XM_PI - 0.1f);
         } if (btn_state & MK_RBUTTON) {
-            float dx = 0.005f * (x - last_mouse.x);
-            float dy = 0.005f * (y - last_mouse.y);
+            float dx = 0.05f * (x - last_mouse.x);
+            float dy = 0.05f * (y - last_mouse.y);
             radius += dx - dy;
-            radius = std::clamp(radius, 3.0f, 25.0f);
+            radius = std::clamp(radius, 5.0f, 150.0f);
         }
         last_mouse.x = x;
         last_mouse.y = y;
@@ -168,16 +167,28 @@ class D3DAppLandWave : public D3DApp {
     void OnMouseUp(WPARAM btn_state, int x, int y) override {
         ReleaseCapture();
     }
-
     void OnKeyboardInput(const Timer &timer) {
-        if (GetAsyncKeyState('1') & 0x8000) {
-            wire_frame = !wire_frame;
+        const float dt = timer.DeltaTime();
+        if (GetAsyncKeyState(VK_LEFT) & 0x8000) {
+            sun_theta -= 1.0f * dt;
         }
+        if (GetAsyncKeyState(VK_RIGHT) & 0x8000) {
+            sun_theta += 1.0f * dt;
+        }
+        if (GetAsyncKeyState(VK_UP) & 0x8000) {
+            sun_phi -= 1.0f * dt;
+        }
+        if (GetAsyncKeyState(VK_DOWN) & 0x8000) {
+            sun_phi += 1.0f * dt;
+        }
+        sun_phi = std::clamp(sun_phi, 0.1f, XM_PIDIV2);
     }
+
     void UpdateCamera(const Timer &timer) {
         float x = radius * std::sin(phi) * std::cos(theta);
         float y = radius * std::cos(phi);
         float z = radius * std::sin(phi) * std::sin(theta);
+        eye = { x, y, z };
 
         XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
         XMVECTOR lookat = XMVectorZero();
@@ -186,13 +197,16 @@ class D3DAppLandWave : public D3DApp {
         XMStoreFloat4x4(&view, _view);
     }
     void UpdateObjCont(const Timer &timer) {
-        auto obj_cb_upd = curr_fr->p_obj_cb.get();
+        auto curr_obj_cb = curr_fr->p_obj_cb.get();
         for (auto &item : items) {
             if (item->n_frame_dirty > 0) {
                 XMMATRIX model = XMLoadFloat4x4(&item->model);
                 ObjectConst obj_const;
                 XMStoreFloat4x4(&obj_const.model, model);
-                obj_cb_upd->CopyData(item->obj_cb_ind, obj_const);
+                XMMATRIX model_t = XMMatrixTranspose(model);
+                XMMATRIX model_it = XMMatrixInverse(&XMMatrixDeterminant(model_t), model_t);
+                XMStoreFloat4x4(&obj_const.model_it, model_it);
+                curr_obj_cb->CopyData(item->obj_cb_ind, obj_const);
                 --item->n_frame_dirty;
             }
         }
@@ -213,15 +227,36 @@ class D3DAppLandWave : public D3DApp {
         XMStoreFloat4x4(&main_pass_cb.vp, _vp);
         XMStoreFloat4x4(&main_pass_cb.vp_inv, _vp_inv);
         main_pass_cb.eye = eye;
-        main_pass_cb.near_z = 0.1f;
-        main_pass_cb.far_z = 100.0f;
         main_pass_cb.rt_size = { (float) client_width, (float) client_height };
         main_pass_cb.rt_size_inv = { 1.0f / client_width, 1.0f / client_height };
+        main_pass_cb.near_z = 0.1f;
+        main_pass_cb.far_z = 1000.0f;
         main_pass_cb.delta_time = timer.DeltaTime();
         main_pass_cb.total_time = timer.TotalTime();
+        main_pass_cb.ambient = { 0.25f, 0.25f, 0.35f, 1.0f };
+
+        XMVECTOR light_dir = -DXMath::Spherical2Cartesian(1.0f, sun_theta, sun_phi);
+        XMStoreFloat3(&main_pass_cb.lights[0].direction, light_dir);
+        main_pass_cb.lights[0].strength = { 1.0f, 1.0f, 0.9f };
 
         auto curr_pass_cb = curr_fr->p_pass_cb.get();
         curr_pass_cb->CopyData(0, main_pass_cb);
+    }
+    void UpdateMaterialConst(const Timer &timer) {
+        auto curr_mat_cb = curr_fr->p_mat_cb.get();
+        for (auto &[_, _mat] : materials) {
+            Material *mat = _mat.get();
+            if (mat->n_frame_dirty > 0) {
+                XMMATRIX mat_transform = XMLoadFloat4x4(&mat->mat_transform);
+                MaterialConst mat_const;
+                mat_const.albedo = mat->albedo;
+                mat_const.fresnel_r0 = mat->fresnel_r0;
+                mat_const.roughness = mat->roughness;
+                XMStoreFloat4x4(&mat_const.mat_transform, mat_transform);
+                curr_mat_cb->CopyData(mat->mat_cb_ind, mat_const);
+                --mat->n_frame_dirty;
+            }
+        }
     }
     void UpdateWaves(const Timer &timer) {
         // Every quarter second, generate a random wave.
@@ -246,7 +281,7 @@ class D3DAppLandWave : public D3DApp {
             Vertex v;
 
             v.pos = p_wave->Position(i);
-            v.color = XMFLOAT4(DirectX::Colors::Blue);
+            v.norm = p_wave->Normal(i);
 
             wave_vb->CopyData(i, v);
         }
@@ -256,12 +291,13 @@ class D3DAppLandWave : public D3DApp {
     }
 
     void BuildRootSignature() {
-        CD3DX12_ROOT_PARAMETER rt_params[2];
+        CD3DX12_ROOT_PARAMETER rt_params[3];
         rt_params[0].InitAsConstantBufferView(0);
         rt_params[1].InitAsConstantBufferView(1);
+        rt_params[2].InitAsConstantBufferView(2);
 
-        CD3DX12_ROOT_SIGNATURE_DESC rt_sig_desc(2, rt_params, 0, nullptr,
-            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        CD3DX12_ROOT_SIGNATURE_DESC rt_sig_desc(sizeof(rt_params) / sizeof(rt_params[0]), rt_params,
+            0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serialized_rt_sig = nullptr;
         ComPtr<ID3DBlob> error = nullptr;
@@ -277,15 +313,15 @@ class D3DAppLandWave : public D3DApp {
     }
     void BuildShaderAndInputLayout() {
         // build shader from hlsl file
-        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch07_land_wave/shaders/shape.hlsl",
+        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch08_lighting/shaders/P3N3_default.hlsl",
             nullptr, "VS", "vs_5_1");
-        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch07_land_wave/shaders/shape.hlsl",
+        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch08_lighting/shaders/P3N3_default.hlsl",
             nullptr, "PS", "ps_5_1");
 
         // input layout and input elements specify input of (vertex) shader
         input_layout = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         };
     }
     void BuildLandGeometry() {
@@ -297,18 +333,7 @@ class D3DAppLandWave : public D3DApp {
             const auto &p = grid.vertices[i].pos;
             vertices[i].pos = p;
             vertices[i].pos.y = GetHillHeight(p.x, p.z);
-
-            if (vertices[i].pos.y < -10.0f) {
-                vertices[i].color = XMFLOAT4(1.0f, 0.96f, 0.62f, 1.0f);
-            } else if (vertices[i].pos.y < 5.0f) {
-                vertices[i].color = XMFLOAT4(0.48f, 0.77f, 0.46f, 1.0f);
-            } else if (vertices[i].pos.y < 12.0f) {
-                vertices[i].color = XMFLOAT4(0.1f, 0.48f, 0.19f, 1.0f);
-            } else if (vertices[i].pos.y < 20.0f) {
-                vertices[i].color = XMFLOAT4(0.45f, 0.39f, 0.34f, 1.0f);
-            } else {
-                vertices[i].color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-            }
+            vertices[i].norm = GetHillNormal(p.x, p.z);
         }
         std::vector<uint16_t> indices = grid.GetIndices16();
 
@@ -391,6 +416,26 @@ class D3DAppLandWave : public D3DApp {
 
         geometries["water_geo"] = std::move(geo);
     }
+    void BuildMaterials() {
+        auto grass = std::make_unique<Material>();
+        grass->name = "grass";
+        grass->n_frame_dirty = n_frame_resource;
+        grass->mat_cb_ind = 0;
+        grass->albedo = { 0.2f, 0.6f, 0.2f, 1.0f };
+        grass->fresnel_r0 = { 0.01f, 0.01f, 0.01f };
+        grass->roughness = 0.125f;
+
+        auto water = std::make_unique<Material>();
+        water->name = "water";
+        water->n_frame_dirty = n_frame_resource;
+        water->mat_cb_ind = 1;
+        water->albedo = { 0.0f, 0.2f, 0.6f, 1.0f };
+        water->fresnel_r0 = { 0.1f, 0.1f, 0.1f };
+        water->roughness = 0.0f;
+
+        materials["grass"] = std::move(grass);
+        materials["water"] = std::move(water);
+    }
     void BuildPSOs() {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC opaque_pso_desc = {};
         opaque_pso_desc.InputLayout = { input_layout.data(), (UINT) input_layout.size() };
@@ -415,22 +460,30 @@ class D3DAppLandWave : public D3DApp {
         opaque_pso_desc.RTVFormats[0] = back_buffer_fmt;
         opaque_pso_desc.DSVFormat = depth_stencil_fmt;
         ThrowIfFailed(p_device->CreateGraphicsPipelineState(&opaque_pso_desc, IID_PPV_ARGS(&psos["opaque"])));
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC opaque_wf_pso_desc = opaque_pso_desc;
-        opaque_wf_pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME; // wire frame mode
-        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&opaque_wf_pso_desc, IID_PPV_ARGS(&psos["opaque_wf"])));
     }
     void BuildFrameResources() {
         for (int i = 0; i < n_frame_resource; i++) {
-            frame_resources.push_back(std::make_unique<FrameResource>(p_device.Get(), 1, items.size(),
-                p_wave->VertexCount()));
+            frame_resources.push_back(std::make_unique<FrameResource>(p_device.Get(), 1,
+                items.size(), materials.size(), p_wave->VertexCount()));
         }
     }
     void BuildRenderItems() {
+        auto grid_ritem = std::make_unique<RenderItem>();
+        grid_ritem->model = DXMath::Identity4x4();
+        grid_ritem->obj_cb_ind = 0;
+        grid_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        grid_ritem->mat = materials["grass"].get();
+        grid_ritem->geo = geometries["land_geo"].get();
+        grid_ritem->n_index = grid_ritem->geo->draw_args["grid"].n_index;
+        grid_ritem->start_index = grid_ritem->geo->draw_args["grid"].start_index;
+        grid_ritem->base_vertex = grid_ritem->geo->draw_args["grid"].base_vertex;
+        ritem_layer[(size_t) RenderLayor::Opaque].push_back(grid_ritem.get());
+
         auto wave_ritem = std::make_unique<RenderItem>();
         wave_ritem->model = DXMath::Identity4x4();
-        wave_ritem->obj_cb_ind = 0;
+        wave_ritem->obj_cb_ind = 1;
         wave_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        wave_ritem->mat = materials["water"].get();
         wave_ritem->geo = geometries["water_geo"].get();
         wave_ritem->n_index = wave_ritem->geo->draw_args["grid"].n_index;
         wave_ritem->start_index = wave_ritem->geo->draw_args["grid"].start_index;
@@ -438,23 +491,15 @@ class D3DAppLandWave : public D3DApp {
         ritem_layer[(size_t) RenderLayor::Opaque].push_back(wave_ritem.get());
         this->wave_ritem = wave_ritem.get();
 
-        auto grid_ritem = std::make_unique<RenderItem>();
-        grid_ritem->model = DXMath::Identity4x4();
-        grid_ritem->obj_cb_ind = 1;
-        grid_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        grid_ritem->geo = geometries["land_geo"].get();
-        grid_ritem->n_index = grid_ritem->geo->draw_args["grid"].n_index;
-        grid_ritem->start_index = grid_ritem->geo->draw_args["grid"].start_index;
-        grid_ritem->base_vertex = grid_ritem->geo->draw_args["grid"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Opaque].push_back(grid_ritem.get());
-
-        items.push_back(std::move(wave_ritem));
         items.push_back(std::move(grid_ritem));
+        items.push_back(std::move(wave_ritem));
     }
 
     void DrawRenderItems(ID3D12GraphicsCommandList *cmd_list, const std::vector<RenderItem *> &items) {
         UINT obj_cb_size = D3DUtil::CBSize(sizeof(ObjectConst));
+        UINT mat_cb_size = D3DUtil::CBSize(sizeof(MaterialConst));
         auto obj_cb = curr_fr->p_obj_cb->Resource();
+        auto mat_cb = curr_fr->p_mat_cb->Resource();
         for (auto item : items) { // per object
             // set vb, ib and primitive type
             cmd_list->IASetVertexBuffers(0, 1, &item->geo->VertexBufferView());
@@ -462,9 +507,11 @@ class D3DAppLandWave : public D3DApp {
             cmd_list->IASetPrimitiveTopology(item->prim_ty);
 
             // set per object cbv
-            auto obj_cb_addr = obj_cb->GetGPUVirtualAddress();
-            obj_cb_addr += item->obj_cb_ind * obj_cb_size;
+            auto obj_cb_addr = obj_cb->GetGPUVirtualAddress() + item->obj_cb_ind * obj_cb_size;
             cmd_list->SetGraphicsRootConstantBufferView(0, obj_cb_addr);
+            // set matertial cbv
+            auto mat_cb_addr = mat_cb->GetGPUVirtualAddress() + item->mat->mat_cb_ind * mat_cb_size;
+            cmd_list->SetGraphicsRootConstantBufferView(1, mat_cb_addr);
 
             // draw
             cmd_list->DrawIndexedInstanced(item->n_index, 1, item->start_index, item->base_vertex, 0);
@@ -493,6 +540,7 @@ class D3DAppLandWave : public D3DApp {
     ComPtr<ID3D12RootSignature> p_rt_sig = nullptr;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> geometries;
+    std::unordered_map<std::string, std::unique_ptr<Material>> materials;
     std::unordered_map<std::string, ComPtr<ID3DBlob>> shaders;
     std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> psos;
 
@@ -505,15 +553,16 @@ class D3DAppLandWave : public D3DApp {
 
     PassConst main_pass_cb;
 
-    bool wire_frame = false;
-
     XMFLOAT3 eye = { 0.0f, 0.0f, 0.0f };
     XMFLOAT4X4 view = DXMath::Identity4x4();
     XMFLOAT4X4 proj = DXMath::Identity4x4();
 
     float theta = 0.0f;
     float phi = XM_PIDIV2;
-    float radius = 15.0f;
+    float radius = 25.0f;
+
+    float sun_theta = 1.25 * XM_PI;
+    float sun_phi = XM_PIDIV4;
 
     POINT last_mouse;
 };
@@ -524,7 +573,7 @@ int WINAPI WinMain(HINSTANCE h_inst, HINSTANCE h_prev_inst, PSTR cmd_line, int s
 #endif
 
     try {
-        D3DAppLandWave d3d_app(h_inst);
+        D3DAppLighting d3d_app(h_inst);
         if (!d3d_app.Initialize()) {
             return 0;
         }
