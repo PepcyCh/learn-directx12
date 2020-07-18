@@ -6,3 +6,4 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_WIN32_EXECUTABLE TRUE)
 
 add_subdirectory(src)
+add_subdirectory(external)
