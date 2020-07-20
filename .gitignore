@@ -1,7 +1,8 @@
 .DS_Store
 .vscode
+.clangd
 build
 bin
-
+compile_commands.json
 textures
 defines.h

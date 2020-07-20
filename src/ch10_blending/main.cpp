@@ -35,7 +35,7 @@ struct RenderItem {
 enum class RenderLayor : size_t {
     Opaque,      // opaque models
     AlphaTested, // models with transparent part
-    Transparent, // transparent models
+    Transparent, // transparent models that need blending
     Count
 };
 
@@ -120,7 +120,7 @@ class D3DAppBlending : public D3DApp {
         // clear rtv and dsv
         auto back_buffer_view = CurrBackBufferView();
         auto depth_stencil_view = DepthStencilView();
-        p_cmd_list->ClearRenderTargetView(back_buffer_view, Colors::LightBlue, 0, nullptr);
+        p_cmd_list->ClearRenderTargetView(back_buffer_view, (float *) &main_pass_cb.fog_color, 0, nullptr);
         p_cmd_list->ClearDepthStencilView(depth_stencil_view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
             1.0f, 0, 0, nullptr);
         // set rtv and dsv
