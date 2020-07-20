@@ -22,8 +22,9 @@ class D3DAppInit : public D3DApp {
         ThrowIfFailed(p_cmd_list->Reset(p_cmd_allocator.Get(), nullptr));
 
         // transit back buffer state (present -> render target)
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+        auto transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
 
         // viewport & scissors
         p_cmd_list->RSSetViewports(1, &viewport);
@@ -35,11 +36,14 @@ class D3DAppInit : public D3DApp {
             D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
         
         // set render target
-        p_cmd_list->OMSetRenderTargets(1, &CurrBackBufferView(), true, &DepthStencilView());
+        auto back_buffer_view = CurrBackBufferView();
+        auto depth_stencil_view = DepthStencilView();
+        p_cmd_list->OMSetRenderTargets(1, &back_buffer_view, true, &depth_stencil_view);
         
         // transit back buffer state (render target -> present)
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+        transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
 
         ThrowIfFailed(p_cmd_list->Close());
     

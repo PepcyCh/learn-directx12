@@ -351,8 +351,8 @@ void D3DApp::OnResize() {
     opt_clear.Format = depth_stencil_fmt;
     opt_clear.DepthStencil.Depth = 1.0f;
     opt_clear.DepthStencil.Stencil = 0;
-    ThrowIfFailed(p_device->CreateCommittedResource(
-        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+    auto ds_heap_prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(p_device->CreateCommittedResource(&ds_heap_prop,
         D3D12_HEAP_FLAG_NONE, &depth_stencil_desc, D3D12_RESOURCE_STATE_COMMON,
         &opt_clear, IID_PPV_ARGS(&depth_stencil_buffer)));
     // create dsv
@@ -363,8 +363,9 @@ void D3DApp::OnResize() {
     dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
     p_device->CreateDepthStencilView(depth_stencil_buffer.Get(), &dsv_desc, DepthStencilView());
     // ds recourse state transit
-    p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(depth_stencil_buffer.Get(), 
-        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+    auto ds_transit = CD3DX12_RESOURCE_BARRIER::Transition(depth_stencil_buffer.Get(), 
+        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    p_cmd_list->ResourceBarrier(1, &ds_transit);
     
     // execute & flush
     ThrowIfFailed(p_cmd_list->Close());
@@ -386,7 +387,7 @@ void D3DApp::FlushCommandQueue() {
     ++curr_fence;
     ThrowIfFailed(p_cmd_queue->Signal(p_fence.Get(), curr_fence));
     if (p_fence->GetCompletedValue() < curr_fence) {
-        HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
+        HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
         ThrowIfFailed(p_fence->SetEventOnCompletion(curr_fence, event));
         WaitForSingleObject(event, INFINITE);
         CloseHandle(event);

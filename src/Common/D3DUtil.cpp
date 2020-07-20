@@ -52,14 +52,18 @@ ComPtr<ID3D12Resource> D3DUtil::CreateDefaultBuffer(ID3D12Device *device,
         ComPtr<ID3D12Resource> &upload_buf) {
     ComPtr<ID3D12Resource> default_buf;
 
+    auto default_heap_prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    auto upload_heap_prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    auto resource_desc = CD3DX12_RESOURCE_DESC::Buffer(size);
+
     // create default resource
-    ThrowIfFailed(device->CreateCommittedResource(&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-        D3D12_HEAP_FLAG_NONE, &CD3DX12_RESOURCE_DESC::Buffer(size), D3D12_RESOURCE_STATE_COMMON,
+    ThrowIfFailed(device->CreateCommittedResource(&default_heap_prop,
+        D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_COMMON,
         nullptr, IID_PPV_ARGS(&default_buf)));
 
     // create upload buffer
-    ThrowIfFailed(device->CreateCommittedResource(&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-        D3D12_HEAP_FLAG_NONE, &CD3DX12_RESOURCE_DESC::Buffer(size), D3D12_RESOURCE_STATE_GENERIC_READ,
+    ThrowIfFailed(device->CreateCommittedResource(&upload_heap_prop,
+        D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
         nullptr, IID_PPV_ARGS(&upload_buf)));
 
     // copy data
@@ -68,11 +72,13 @@ ComPtr<ID3D12Resource> D3DUtil::CreateDefaultBuffer(ID3D12Device *device,
     sub_rsc_data.pData = data;
     sub_rsc_data.RowPitch = size;
     sub_rsc_data.SlicePitch = sub_rsc_data.RowPitch;
-    cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(default_buf.Get(),
-        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
+    auto transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(default_buf.Get(),
+        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd_list->ResourceBarrier(1, &transit_barrier);
     UpdateSubresources<1>(cmd_list, default_buf.Get(), upload_buf.Get(), 0, 0, 1, &sub_rsc_data);
-    cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(default_buf.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ));
+    transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(default_buf.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+    cmd_list->ResourceBarrier(1, &transit_barrier);
 
     return default_buf;
 }

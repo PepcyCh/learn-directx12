@@ -103,14 +103,17 @@ class D3DAppBox : public D3DApp {
         p_cmd_list->RSSetScissorRects(1, &scissors);
 
         // back buffer: present -> render target
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+        auto transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
         // clear rtv and dsv
-        p_cmd_list->ClearRenderTargetView(CurrBackBufferView(), Colors::LightBlue, 0, nullptr);
-        p_cmd_list->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+        auto back_buffer_view = CurrBackBufferView();
+        auto depth_stencil_view = DepthStencilView();
+        p_cmd_list->ClearRenderTargetView(back_buffer_view, Colors::LightBlue, 0, nullptr);
+        p_cmd_list->ClearDepthStencilView(depth_stencil_view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
             1.0f, 0, 0, nullptr);
         // set rtv and dsv
-        p_cmd_list->OMSetRenderTargets(1, &CurrBackBufferView(), true, &DepthStencilView());
+        p_cmd_list->OMSetRenderTargets(1, &back_buffer_view, true, &depth_stencil_view);
 
         // set heaps (cbv_srv_uav)
         ID3D12DescriptorHeap *heaps[] = { p_cbv_heap.Get() };
@@ -121,8 +124,10 @@ class D3DAppBox : public D3DApp {
 
         // set vbv, ibv and primitive topology
         // pay attention to 'D3D12_PRIMITIVE_TOPOLOGY' and 'D3D12_PRIMITIVE_TOPOLOGY_TYPE'
-        p_cmd_list->IASetVertexBuffers(0, 1, &p_mesh->VertexBufferView());
-        p_cmd_list->IASetIndexBuffer(&p_mesh->IndexBufferView());
+        auto vbv = p_mesh->VertexBufferView();
+        auto ibv = p_mesh->IndexBufferView();
+        p_cmd_list->IASetVertexBuffers(0, 1, &vbv);
+        p_cmd_list->IASetIndexBuffer(&ibv);
         p_cmd_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         // set root descriptor table
@@ -132,8 +137,9 @@ class D3DAppBox : public D3DApp {
         p_cmd_list->DrawIndexedInstanced(p_mesh->draw_args["box"].n_index, 1, 0, 0, 0);
 
         // back buffer: render target -> present
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+        transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
 
         // close, swap and flush
         ThrowIfFailed(p_cmd_list->Close());

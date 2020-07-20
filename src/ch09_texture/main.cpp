@@ -89,7 +89,7 @@ class D3DAppTexture : public D3DApp {
         curr_fr_ind = (curr_fr_ind + 1) % n_frame_resource;
         curr_fr = frame_resources[curr_fr_ind].get();
         if (curr_fr->fence != 0 && p_fence->GetCompletedValue() < curr_fr->fence) {
-            HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
+            HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
             ThrowIfFailed(p_fence->SetEventOnCompletion(curr_fr->fence, event));
             WaitForSingleObject(event, INFINITE);
             CloseHandle(event);
@@ -112,15 +112,17 @@ class D3DAppTexture : public D3DApp {
         p_cmd_list->RSSetScissorRects(1, &scissors);
 
         // back buffer: present -> render target
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
-
-        // clear rtv & dsv
-        p_cmd_list->ClearRenderTargetView(CurrBackBufferView(), Colors::LightBlue, 0, nullptr);
-        p_cmd_list->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+        auto transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
+        // clear rtv and dsv
+        auto back_buffer_view = CurrBackBufferView();
+        auto depth_stencil_view = DepthStencilView();
+        p_cmd_list->ClearRenderTargetView(back_buffer_view, Colors::LightBlue, 0, nullptr);
+        p_cmd_list->ClearDepthStencilView(depth_stencil_view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
             1.0f, 0, 0, nullptr);
-        // set render target
-        p_cmd_list->OMSetRenderTargets(1, &CurrBackBufferView(), true, &DepthStencilView());
+        // set rtv and dsv
+        p_cmd_list->OMSetRenderTargets(1, &back_buffer_view, true, &depth_stencil_view);
 
         // set root signature
         p_cmd_list->SetGraphicsRootSignature(p_rt_sig.Get());
@@ -135,8 +137,9 @@ class D3DAppTexture : public D3DApp {
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Opaque]);
 
         // back buffer: render target -> present
-        p_cmd_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+        transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        p_cmd_list->ResourceBarrier(1, &transit_barrier);
         
         // close & begin execution
         ThrowIfFailed(p_cmd_list->Close());
@@ -201,7 +204,8 @@ class D3DAppTexture : public D3DApp {
                 XMMATRIX model = XMLoadFloat4x4(&item->model);
                 XMStoreFloat4x4(&obj_const.model, model);
                 XMMATRIX model_t = XMMatrixTranspose(model);
-                XMMATRIX model_it = XMMatrixInverse(&XMMatrixDeterminant(model_t), model_t);
+                auto model_t_det = XMMatrixDeterminant(model_t);
+                XMMATRIX model_it = XMMatrixInverse(&model_t_det, model_t);
                 XMStoreFloat4x4(&obj_const.model_it, model_it);
                 XMMATRIX tex_transform = XMLoadFloat4x4(&item->tex_transform);
                 XMStoreFloat4x4(&obj_const.tex_transform, tex_transform);
@@ -214,10 +218,13 @@ class D3DAppTexture : public D3DApp {
         XMMATRIX _view = XMLoadFloat4x4(&view);
         XMMATRIX _proj = XMLoadFloat4x4(&proj);
 
-        XMMATRIX _view_inv = XMMatrixInverse(&XMMatrixDeterminant(_view), _view);
-        XMMATRIX _proj_inv = XMMatrixInverse(&XMMatrixDeterminant(_proj), _proj);
+        auto _view_det = XMMatrixDeterminant(_view);
+        XMMATRIX _view_inv = XMMatrixInverse(&_view_det, _view);
+        auto _proj_det = XMMatrixDeterminant(_proj);
+        XMMATRIX _proj_inv = XMMatrixInverse(&_proj_det, _proj);
         XMMATRIX _vp = XMMatrixMultiply(_view, _proj);
-        XMMATRIX _vp_inv = XMMatrixInverse(&XMMatrixDeterminant(_vp), _vp);
+        auto _vp_det = XMMatrixDeterminant(_vp);
+        XMMATRIX _vp_inv = XMMatrixInverse(&_vp_det, _vp);
 
         XMStoreFloat4x4(&main_pass_cb.view, _view);
         XMStoreFloat4x4(&main_pass_cb.view_inv, _view_inv);
@@ -362,8 +369,8 @@ class D3DAppTexture : public D3DApp {
         rt_params[0].InitAsConstantBufferView(0);
         rt_params[1].InitAsConstantBufferView(1);
         rt_params[2].InitAsConstantBufferView(2);
-        rt_params[3].InitAsDescriptorTable(1, &CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0),
-            D3D12_SHADER_VISIBILITY_PIXEL);
+        auto srv_range = CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        rt_params[3].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
         auto static_samplers = GetStaticSampler();
         CD3DX12_ROOT_SIGNATURE_DESC rt_sig_desc(sizeof(rt_params) / sizeof(rt_params[0]), rt_params,
@@ -667,8 +674,10 @@ class D3DAppTexture : public D3DApp {
         auto mat_cb = curr_fr->p_mat_cb->Resource();
         for (auto item : items) { // per object
             // set vb, ib and primitive type
-            cmd_list->IASetVertexBuffers(0, 1, &item->geo->VertexBufferView());
-            cmd_list->IASetIndexBuffer(&item->geo->IndexBufferView());
+            auto vbv = item->geo->VertexBufferView();
+            auto ibv = item->geo->IndexBufferView();
+            cmd_list->IASetVertexBuffers(0, 1, &vbv);
+            cmd_list->IASetIndexBuffer(&ibv);
             cmd_list->IASetPrimitiveTopology(item->prim_ty);
 
             // set per object cbv
