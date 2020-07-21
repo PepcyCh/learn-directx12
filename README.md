@@ -18,7 +18,7 @@ Use CMake to build.
   * [x] chap. 8 - lighting
   * [x] chap. 9 - texturing
   * [x] chap. 10 - blending
-  * [ ] chap. 11 - stenciling
+  * [x] chap. 11 - stenciling
   * [ ] chap. 12 - geometry shader
   * [ ] chap. 13 - compute shader
   * [ ] chap. 14 - tessellation
