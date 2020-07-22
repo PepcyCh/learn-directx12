@@ -54,15 +54,18 @@ struct RenderItem {
 };
 
 enum class RenderLayor : size_t {
-    Opaque,      // opaque models
-    Mirror,      // stencil
-    Reflected,   // reflected models
-    Transparent, // transparent models that need blending
+    Opaque,         // opaque models
+    Mirror,         // stencil
+    Reflected,      // reflected models
+    Transparent,    // transparent models that need blending
+    OutlineStencil, // use stencil to draw outline
+    Outline,
     Count
 };
 
 // no shadow matrix shadow
 // add reflected floor
+// add stencil-based outlining
 
 class D3DAppStenciling : public D3DApp {
   public:
@@ -176,6 +179,17 @@ class D3DAppStenciling : public D3DApp {
         p_cmd_list->SetPipelineState(psos["transparent"].Get());
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Transparent]);
 
+        if (b_outline) {
+            p_cmd_list->OMSetStencilRef(2);
+            p_cmd_list->SetPipelineState(psos["outline_stencil"].Get());
+            DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::OutlineStencil]);
+
+            p_cmd_list->SetPipelineState(psos["outline"].Get());
+            DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Outline]);
+
+            p_cmd_list->OMSetStencilRef(0);
+        }
+
         // back buffer: render target -> present
         transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
             D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -223,6 +237,10 @@ class D3DAppStenciling : public D3DApp {
     void OnKeyboardInput(const Timer &timer) {
         float dt = timer.DeltaTime();
 
+        if (GetAsyncKeyState('1') & 0x8000) {
+            b_outline = !b_outline;
+        }
+
         if (GetAsyncKeyState('A') & 0x8000) {
             skull_translation.x += 1.0f * dt;
         }
@@ -243,12 +261,17 @@ class D3DAppStenciling : public D3DApp {
         XMMATRIX model = rotate * scale * translate;
         XMStoreFloat4x4(&p_skull_ritem->model, model);
 
+        XMMATRIX outline_scale = XMMatrixScaling(1.2f, 1.2f, 1.2f);
+        XMMATRIX outline_model = rotate * scale * outline_scale * translate;
+        XMStoreFloat4x4(&p_outline_skull_ritem->model, outline_model);
+
         XMVECTOR mirror_plane = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
         XMMATRIX reflect = XMMatrixReflect(mirror_plane);
         XMStoreFloat4x4(&p_reflected_skull_ritem->model, model * reflect);
 
         p_skull_ritem->n_frame_dirty = n_frame_resource;
         p_reflected_skull_ritem->n_frame_dirty = n_frame_resource;
+        p_outline_skull_ritem->n_frame_dirty = n_frame_resource;
     }
 
     void UpdateCamera(const Timer &timer) {
@@ -482,6 +505,8 @@ class D3DAppStenciling : public D3DApp {
             nullptr, "VS", "vs_5_1");
         shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch11_stenciling/shaders/P3N3U2_default.hlsl",
             fog_defines, "PS", "ps_5_1");
+        shaders["purecolor_ps"] = D3DUtil::CompileShader(src_path + L"ch11_stenciling/shaders/pure_color.hlsl",
+            nullptr, "PS", "ps_5_1");
 
         // input layout and input elements specify input of (vertex) shader
         input_layout = {
@@ -769,6 +794,22 @@ class D3DAppStenciling : public D3DApp {
         reflect_pso_desc.RasterizerState.FrontCounterClockwise = false;
         ThrowIfFailed(p_device->CreateGraphicsPipelineState(&reflect_pso_desc,
             IID_PPV_ARGS(&psos["stencil_reflect"])));
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC outline_stencil_pso_desc = mirror_pso_desc;
+        outline_stencil_pso_desc.DepthStencilState.DepthEnable = false;
+        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&outline_stencil_pso_desc,
+            IID_PPV_ARGS(&psos["outline_stencil"])));
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC outline_pso_desc = opaque_pso_desc;
+        outline_pso_desc.PS = {
+            reinterpret_cast<BYTE *>(shaders["purecolor_ps"]->GetBufferPointer()),
+            shaders["purecolor_ps"]->GetBufferSize()
+        };
+        outline_pso_desc.DepthStencilState.DepthEnable = false;
+        outline_pso_desc.DepthStencilState.StencilEnable = true;
+        outline_pso_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&outline_pso_desc,
+            IID_PPV_ARGS(&psos["outline"])));
     }
     void BuildFrameResources() {
         for (int i = 0; i < n_frame_resource; i++) {
@@ -830,22 +871,24 @@ class D3DAppStenciling : public D3DApp {
         skull_ritem->start_index = skull_ritem->geo->draw_args["skull"].start_index;
         skull_ritem->base_vertex = skull_ritem->geo->draw_args["skull"].base_vertex;
         ritem_layer[(size_t) RenderLayor::Opaque].push_back(skull_ritem.get());
+        ritem_layer[(size_t) RenderLayor::OutlineStencil].push_back(skull_ritem.get());
         p_skull_ritem = skull_ritem.get();
-        items.push_back(std::move(skull_ritem));
 
         auto reflect_skull_ritem = std::make_unique<RenderItem>();
-        reflect_skull_ritem->model = DXMath::Identity4x4(); // will be set in 'OnKeyboardInput()'
-        reflect_skull_ritem->tex_transform = DXMath::Identity4x4();
+        *reflect_skull_ritem = *skull_ritem;
         reflect_skull_ritem->obj_cb_ind = obj_cb_ind++;
-        reflect_skull_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        reflect_skull_ritem->mat = materials["skull"].get();
-        reflect_skull_ritem->geo = geometries["skull_geo"].get();
-        reflect_skull_ritem->n_index = reflect_skull_ritem->geo->draw_args["skull"].n_index;
-        reflect_skull_ritem->start_index = reflect_skull_ritem->geo->draw_args["skull"].start_index;
-        reflect_skull_ritem->base_vertex = reflect_skull_ritem->geo->draw_args["skull"].base_vertex;
         ritem_layer[(size_t) RenderLayor::Reflected].push_back(reflect_skull_ritem.get());
         p_reflected_skull_ritem = reflect_skull_ritem.get();
+
+        auto outline_skull_ritem = std::make_unique<RenderItem>();
+        *outline_skull_ritem = *skull_ritem;
+        outline_skull_ritem->obj_cb_ind = obj_cb_ind++;
+        ritem_layer[(size_t) RenderLayor::Outline].push_back(outline_skull_ritem.get());
+        p_outline_skull_ritem = outline_skull_ritem.get();
+
+        items.push_back(std::move(outline_skull_ritem));
         items.push_back(std::move(reflect_skull_ritem));
+        items.push_back(std::move(skull_ritem));
 
         auto mirror_ritem = std::make_unique<RenderItem>();
         mirror_ritem->model = DXMath::Identity4x4();
@@ -910,8 +953,11 @@ class D3DAppStenciling : public D3DApp {
     std::vector<RenderItem *> ritem_layer[(size_t) RenderLayor::Count];
     RenderItem *p_skull_ritem = nullptr;
     RenderItem *p_reflected_skull_ritem = nullptr;
+    RenderItem *p_outline_skull_ritem = nullptr;
 
     XMFLOAT3 skull_translation = { 0.0f, 1.0f, -5.0f };
+
+    bool b_outline = false;
 
     PassConst main_pass_cb;
     PassConst reflected_pass_cb;
