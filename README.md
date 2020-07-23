@@ -19,7 +19,7 @@ Use CMake to build.
   * [x] chap. 9 - texturing
   * [x] chap. 10 - blending
   * [x] chap. 11 - stenciling
-  * [ ] chap. 12 - geometry shader
+  * [x] chap. 12 - geometry shader
   * [ ] chap. 13 - compute shader
   * [ ] chap. 14 - tessellation
 * [ ] Part 3

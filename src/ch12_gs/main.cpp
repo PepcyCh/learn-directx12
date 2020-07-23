@@ -1,6 +1,5 @@
 #include <array>
 #include <algorithm>
-#include <fstream>
 
 #include <d3dcompiler.h>
 #include <DirectXColors.h>
@@ -13,13 +12,7 @@
 #include "D3DUtil.h"
 #include "GeometryGenerator.h"
 #include "FrameResource.h"
-
-#ifdef max
-#undef max
-#endif
-#ifdef min
-#undef min
-#endif
+#include "Wave.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -40,23 +33,17 @@ struct RenderItem {
 };
 
 enum class RenderLayor : size_t {
-    Opaque,         // opaque models
-    Mirror,         // stencil
-    Reflected,      // reflected models
-    Transparent,    // transparent models that need blending
-    OutlineStencil, // use stencil to draw outline
-    Outline,
+    Opaque,      // opaque models
+    AlphaTested, // models with transparent part
+    Transparent, // transparent models that need blending
+    Sprites,     // tree sprites
     Count
 };
 
-// no shadow matrix shadow
-// add reflected floor
-// add stencil-based outlining
-
-class D3DAppStenciling : public D3DApp {
+class D3DAppBillboard : public D3DApp {
   public:
-    D3DAppStenciling(HINSTANCE h_inst) : D3DApp(h_inst) {}
-    ~D3DAppStenciling() {
+    D3DAppBillboard(HINSTANCE h_inst) : D3DApp(h_inst) {}
+    ~D3DAppBillboard() {
         if (p_device != nullptr) {
             FlushCommandQueue();
         }
@@ -67,14 +54,18 @@ class D3DAppStenciling : public D3DApp {
             return false;
         }
 
+        p_wave = std::make_unique<Wave>(128, 128, 1.0f, 0.03f, 4.0f, 0.2f);
+
         ThrowIfFailed(p_cmd_list->Reset(p_cmd_allocator.Get(), nullptr));
 
         LoadTextures();
         BuildRootSignature();
         BuildDescriptorHeaps();
         BuildShaderAndInputLayout();
-        BuildRoomGeometry();
-        BuildSkullGeometry();
+        BuildLandGeometry();
+        BuildWaveGeometryBuffers();
+        BuildBoxGeometry();
+        BuildTreeSpriteGeometry();
         BuildMaterials();
         BuildRenderItems();
         BuildFrameResources();
@@ -109,9 +100,9 @@ class D3DAppStenciling : public D3DApp {
         }
 
         AnimateMaterials(timer);
+        UpdateWaves(timer);
         UpdateObjectCB(timer);
-        UpdateMainPassCB(timer);
-        UpdateReflectedPassCB(timer);
+        UpdatePassCB(timer);
         UpdateMaterialCB(timer);
     }
     void Draw(const Timer &timer) override {
@@ -142,39 +133,21 @@ class D3DAppStenciling : public D3DApp {
         // set cbv/srv/uav heaps
         ID3D12DescriptorHeap *heaps[] = { p_srv_heap.Get() };
         p_cmd_list->SetDescriptorHeaps(sizeof(heaps) / sizeof(heaps[0]), heaps);
-
-        // draw opaque items
-        UINT pass_cb_size = D3DUtil::CBSize(sizeof(PassConst));
+        // set per pass cbv
         auto pass_cb = curr_fr->p_pass_cb->Resource();
         p_cmd_list->SetGraphicsRootConstantBufferView(2, pass_cb->GetGPUVirtualAddress());
+
+        // draw opaque items
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Opaque]);
-
-        // draw mirror (mark stencil)
-        p_cmd_list->OMSetStencilRef(1);
-        p_cmd_list->SetPipelineState(psos["stencil_mirror"].Get());
-        DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Mirror]);
-
-        // draw reflected items
-        p_cmd_list->SetGraphicsRootConstantBufferView(2, pass_cb->GetGPUVirtualAddress() + pass_cb_size);
-        p_cmd_list->SetPipelineState(psos["stencil_reflect"].Get());
-        DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Reflected]);
-
+        // draw alpha tested items
+        p_cmd_list->SetPipelineState(psos["alpha_tested"].Get());
+        DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::AlphaTested]);
         // draw transparent items
-        p_cmd_list->SetGraphicsRootConstantBufferView(2, pass_cb->GetGPUVirtualAddress());
-        p_cmd_list->OMSetStencilRef(0);
+        p_cmd_list->SetPipelineState(psos["tree_sprite"].Get());
+        DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Sprites]);
+        // draw transparent items
         p_cmd_list->SetPipelineState(psos["transparent"].Get());
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Transparent]);
-
-        if (b_outline) {
-            p_cmd_list->OMSetStencilRef(2);
-            p_cmd_list->SetPipelineState(psos["outline_stencil"].Get());
-            DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::OutlineStencil]);
-
-            p_cmd_list->SetPipelineState(psos["outline"].Get());
-            DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::Outline]);
-
-            p_cmd_list->OMSetStencilRef(0);
-        }
 
         // back buffer: render target -> present
         transit_barrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
@@ -221,43 +194,7 @@ class D3DAppStenciling : public D3DApp {
         ReleaseCapture();
     }
     void OnKeyboardInput(const Timer &timer) {
-        float dt = timer.DeltaTime();
-
-        if (GetAsyncKeyState('1') & 0x8000) {
-            b_outline = !b_outline;
-        }
-
-        if (GetAsyncKeyState('A') & 0x8000) {
-            skull_translation.x += 1.0f * dt;
-        }
-        if (GetAsyncKeyState('D') & 0x8000) {
-            skull_translation.x -= 1.0f * dt;
-        }
-        if (GetAsyncKeyState('W') & 0x8000) {
-            skull_translation.y += 1.0f * dt;
-        }
-        if (GetAsyncKeyState('S') & 0x8000) {
-            skull_translation.y -= 1.0f * dt;
-        }
-        skull_translation.y = std::max(skull_translation.y, 0.0f);
-
-        XMMATRIX rotate = XMMatrixRotationY(0.5 * XM_PI);
-        XMMATRIX scale = XMMatrixScaling(0.45f, 0.45f, 0.45f);
-        XMMATRIX translate = XMMatrixTranslation(skull_translation.x, skull_translation.y, skull_translation.z);
-        XMMATRIX model = rotate * scale * translate;
-        XMStoreFloat4x4(&p_skull_ritem->model, model);
-
-        XMMATRIX outline_scale = XMMatrixScaling(1.2f, 1.2f, 1.2f);
-        XMMATRIX outline_model = rotate * scale * outline_scale * translate;
-        XMStoreFloat4x4(&p_outline_skull_ritem->model, outline_model);
-
-        XMVECTOR mirror_plane = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
-        XMMATRIX reflect = XMMatrixReflect(mirror_plane);
-        XMStoreFloat4x4(&p_reflected_skull_ritem->model, model * reflect);
-
-        p_skull_ritem->n_frame_dirty = n_frame_resource;
-        p_reflected_skull_ritem->n_frame_dirty = n_frame_resource;
-        p_outline_skull_ritem->n_frame_dirty = n_frame_resource;
+        ;
     }
 
     void UpdateCamera(const Timer &timer) {
@@ -290,7 +227,7 @@ class D3DAppStenciling : public D3DApp {
             }
         }
     }
-    void UpdateMainPassCB(const Timer &timer) {
+    void UpdatePassCB(const Timer &timer) {
         XMMATRIX _view = XMLoadFloat4x4(&view);
         XMMATRIX _proj = XMLoadFloat4x4(&proj);
 
@@ -320,29 +257,14 @@ class D3DAppStenciling : public D3DApp {
         main_pass_cb.fog_start = 25.0f;
         main_pass_cb.fog_end = 150.0f;
         main_pass_cb.lights[0].direction = { 0.57735f, -0.57735f, 0.57735f };
-        main_pass_cb.lights[0].strength = { 0.6f, 0.6f, 0.6f };
+        main_pass_cb.lights[0].strength = { 0.9f, 0.9f, 0.9f };
         main_pass_cb.lights[1].direction = { -0.57735f, -0.57735f, 0.57735f };
-        main_pass_cb.lights[1].strength = { 0.3f, 0.3f, 0.3f };
+        main_pass_cb.lights[1].strength = { 0.5f, 0.5f, 0.5f };
         main_pass_cb.lights[2].direction = { 0.0f, -0.707f, -0.707f };
-        main_pass_cb.lights[2].strength = { 0.15f, 0.15f, 0.15f };
+        main_pass_cb.lights[2].strength = { 0.2f, 0.2f, 0.2f };
 
         auto curr_pass_cb = curr_fr->p_pass_cb.get();
         curr_pass_cb->CopyData(0, main_pass_cb);
-    }
-    void UpdateReflectedPassCB(const Timer &timer) {
-        reflected_pass_cb = main_pass_cb;
-
-        XMVECTOR mirror_plane = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
-        XMMATRIX reflect = XMMatrixReflect(mirror_plane);
-
-        for (int i = 0; i < 3; i++) {
-            XMVECTOR light_dir = XMLoadFloat3(&main_pass_cb.lights[i].direction);
-            XMVECTOR reflected_dir = XMVector3TransformNormal(light_dir, reflect);
-            XMStoreFloat3(&reflected_pass_cb.lights[i].direction, reflected_dir);
-        }
-
-        auto pass_cb = curr_fr->p_pass_cb.get();
-        pass_cb->CopyData(1, reflected_pass_cb);
     }
     void UpdateMaterialCB(const Timer &timer) {
         auto curr_mat_cb = curr_fr->p_mat_cb.get();
@@ -360,8 +282,52 @@ class D3DAppStenciling : public D3DApp {
             }
         }
     }
+    void UpdateWaves(const Timer &timer) {
+        // Every quarter second, generate a random wave.
+        static float t_base = 0.0f;
+        if ((this->timer.TotalTime() - t_base) >= 0.25f) {
+            t_base += 0.25f;
+
+            int i = DXMath::RandI(4, p_wave->RowCount() - 5);
+            int j = DXMath::RandI(4, p_wave->ColumnCount() - 5);
+
+            float r = DXMath::RandF(0.2f, 0.5f);
+
+            p_wave->Disturb(i, j, r);
+        }
+
+        // Update the wave simulation.
+        p_wave->Update(timer.DeltaTime());
+
+        // Update the wave vertex buffer with the new solution.
+        auto wave_vb = curr_fr->p_wave_vb.get();
+        for (int i = 0; i < p_wave->VertexCount(); i++) {
+            Vertex v;
+
+            v.pos = p_wave->Position(i);
+            v.norm = p_wave->Normal(i);
+            v.texc.x = 0.5f + v.pos.x / p_wave->Width();
+            v.texc.y = 0.5f + v.pos.z / p_wave->Depth();
+
+            wave_vb->CopyData(i, v);
+        }
+
+        // Set the dynamic VB of the wave renderitem to the current frame VB.
+        wave_ritem->geo->vb_gpu = wave_vb->Resource();
+    }
     void AnimateMaterials(const Timer &timer) {
-        ;
+        auto water_mat = materials["water"].get();
+        float &u = water_mat->mat_transform(3, 0);
+        float &v = water_mat->mat_transform(3, 1);
+        u += 0.1f * timer.DeltaTime();
+        v += 0.02f * timer.DeltaTime();
+        if (u >= 1.0f) {
+            u -= 1.0f;
+        }
+        if (v >= 1.0f) {
+            v -= 1.0f;
+        }
+        water_mat->n_frame_dirty = n_frame_resource;
     }
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSampler() {
@@ -386,33 +352,33 @@ class D3DAppStenciling : public D3DApp {
         ResourceUploadBatch resource_upload(p_device.Get());
         resource_upload.Begin();
 
-        auto bricks_tex = std::make_unique<Texture>();
-        bricks_tex->name = "bricks";
-        bricks_tex->filename = root_path + L"textures/bricks3.dds";
+        auto grass_tex = std::make_unique<Texture>();
+        grass_tex->name = "grass";
+        grass_tex->filename = root_path + L"textures/grass.dds";
         ThrowIfFailed(CreateDDSTextureFromFile(p_device.Get(), resource_upload,
-            bricks_tex->filename.c_str(), &bricks_tex->resource));
-        textures[bricks_tex->name] = std::move(bricks_tex);
+            grass_tex->filename.c_str(), &grass_tex->resource));
+        textures[grass_tex->name] = std::move(grass_tex);
 
-        auto checkboard_tex = std::make_unique<Texture>();
-        checkboard_tex->name = "checkboard";
-        checkboard_tex->filename = root_path + L"textures/checkboard.dds";
+        auto water_tex = std::make_unique<Texture>();
+        water_tex->name = "water";
+        water_tex->filename = root_path + L"textures/water1.dds";
         ThrowIfFailed(CreateDDSTextureFromFile(p_device.Get(), resource_upload,
-            checkboard_tex->filename.c_str(), &checkboard_tex->resource));
-        textures[checkboard_tex->name] = std::move(checkboard_tex);
+            water_tex->filename.c_str(), &water_tex->resource));
+        textures[water_tex->name] = std::move(water_tex);
 
-        auto ice_tex = std::make_unique<Texture>();
-        ice_tex->name = "ice";
-        ice_tex->filename = root_path + L"textures/ice.dds";
+        auto fence_tex = std::make_unique<Texture>();
+        fence_tex->name = "fence";
+        fence_tex->filename = root_path + L"textures/WireFence.dds";
         ThrowIfFailed(CreateDDSTextureFromFile(p_device.Get(), resource_upload,
-            ice_tex->filename.c_str(), &ice_tex->resource));
-        textures[ice_tex->name] = std::move(ice_tex);
+            fence_tex->filename.c_str(), &fence_tex->resource));
+        textures[fence_tex->name] = std::move(fence_tex);
 
-        auto white_tex = std::make_unique<Texture>();
-        white_tex->name = "white";
-        white_tex->filename = root_path + L"textures/white1x1.dds";
+        auto tree_tex = std::make_unique<Texture>();
+        tree_tex->name = "tree";
+        tree_tex->filename = root_path + L"textures/treeArray2.dds";
         ThrowIfFailed(CreateDDSTextureFromFile(p_device.Get(), resource_upload,
-            white_tex->filename.c_str(), &white_tex->resource));
-        textures[white_tex->name] = std::move(white_tex);
+            tree_tex->filename.c_str(), &tree_tex->resource));
+        textures[tree_tex->name] = std::move(tree_tex);
 
         // do copy & flush
         // upload_finish is std::future<void>
@@ -454,30 +420,36 @@ class D3DAppStenciling : public D3DApp {
         ThrowIfFailed(p_device->CreateDescriptorHeap(&srv_heap_desc, IID_PPV_ARGS(&p_srv_heap)));
 
         CD3DX12_CPU_DESCRIPTOR_HANDLE h_srv(p_srv_heap->GetCPUDescriptorHandleForHeapStart());
-        auto bricks_tex = textures["bricks"]->resource;
-        auto checkboard_tex = textures["checkboard"]->resource;
-        auto ice_tex = textures["ice"]->resource;
-        auto white_tex = textures["white"]->resource;
+        auto grass_tex = textures["grass"]->resource;
+        auto water_tex = textures["water"]->resource;
+        auto fence_tex = textures["fence"]->resource;
+        auto tree_tex = textures["tree"]->resource;
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
         srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv_desc.Format = bricks_tex->GetDesc().Format;
+        srv_desc.Format = grass_tex->GetDesc().Format;
         srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv_desc.Texture2D.MostDetailedMip = 0;
         srv_desc.Texture2D.MipLevels = -1;
-        p_device->CreateShaderResourceView(bricks_tex.Get(), &srv_desc, h_srv);
+        p_device->CreateShaderResourceView(grass_tex.Get(), &srv_desc, h_srv);
 
         h_srv.Offset(1, cbv_srv_uav_descriptor_size);
-        srv_desc.Format = checkboard_tex->GetDesc().Format;
-        p_device->CreateShaderResourceView(checkboard_tex.Get(), &srv_desc, h_srv);
+        srv_desc.Format = water_tex->GetDesc().Format;
+        p_device->CreateShaderResourceView(water_tex.Get(), &srv_desc, h_srv);
 
         h_srv.Offset(1, cbv_srv_uav_descriptor_size);
-        srv_desc.Format = ice_tex->GetDesc().Format;
-        p_device->CreateShaderResourceView(ice_tex.Get(), &srv_desc, h_srv);
+        srv_desc.Format = fence_tex->GetDesc().Format;
+        p_device->CreateShaderResourceView(fence_tex.Get(), &srv_desc, h_srv);
 
+        // remember to update srv_desc.ViewDimension to Texture2DArray
         h_srv.Offset(1, cbv_srv_uav_descriptor_size);
-        srv_desc.Format = white_tex->GetDesc().Format;
-        p_device->CreateShaderResourceView(white_tex.Get(), &srv_desc, h_srv);
+        srv_desc.Format = tree_tex->GetDesc().Format;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv_desc.Texture2DArray.ArraySize = tree_tex->GetDesc().DepthOrArraySize;
+        srv_desc.Texture2DArray.MipLevels = -1;
+        srv_desc.Texture2DArray.MostDetailedMip = 0;
+        srv_desc.Texture2DArray.FirstArraySlice = 0;
+        p_device->CreateShaderResourceView(tree_tex.Get(), &srv_desc, h_srv);
     }
     void BuildShaderAndInputLayout() {
         // defines
@@ -485,147 +457,58 @@ class D3DAppStenciling : public D3DApp {
             "FOG", "1",
             nullptr, nullptr
         };
+        const D3D_SHADER_MACRO alpha_test_defines[] = {
+            "FOG", "1",
+            "ALPHA_TEST", "1",
+            nullptr, nullptr
+        };
 
         // build shader from hlsl file
-        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch11_stenciling/shaders/P3N3U2_default.hlsl",
+        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/P3N3U2_default.hlsl",
             nullptr, "VS", "vs_5_1");
-        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch11_stenciling/shaders/P3N3U2_default.hlsl",
+        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/P3N3U2_default.hlsl",
             fog_defines, "PS", "ps_5_1");
-        shaders["purecolor_ps"] = D3DUtil::CompileShader(src_path + L"ch11_stenciling/shaders/pure_color.hlsl",
-            nullptr, "PS", "ps_5_1");
+        shaders["alpha_tested_ps"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/P3N3U2_default.hlsl",
+            alpha_test_defines, "PS", "ps_5_1");
+
+        shaders["tree_sprite_vs"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/tree_sprite.hlsl",
+            nullptr, "VS", "vs_5_1");
+        shaders["tree_sprite_gs"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/tree_sprite.hlsl",
+            nullptr, "GS", "gs_5_1");
+        shaders["tree_sprite_ps"] = D3DUtil::CompileShader(src_path + L"ch12_gs/shaders/tree_sprite.hlsl",
+            alpha_test_defines, "PS", "ps_5_1");
 
         // input layout and input elements specify input of (vertex) shader
-        input_layout = {
+        std_input_layout = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
             { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
         };
+
+        tree_sprite_input_layout = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "SIZE", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        };
     }
-    void BuildRoomGeometry() {
-        std::array<Vertex, 20> vertices = {
-            // Floor: Observe we tile texture coordinates.
-            Vertex(-3.5f, 0.0f, -10.0f, 0.0f, 1.0f, 0.0f, 0.0f, 4.0f), // 0 
-            Vertex(-3.5f, 0.0f,   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f),
-            Vertex( 7.5f, 0.0f,   0.0f, 0.0f, 1.0f, 0.0f, 4.0f, 0.0f),
-            Vertex( 7.5f, 0.0f, -10.0f, 0.0f, 1.0f, 0.0f, 4.0f, 4.0f),
+    void BuildLandGeometry() {
+        GeometryGenerator geo_gen;
+        GeometryGenerator::MeshData grid = geo_gen.Grid(160.0f, 160.0f, 50, 50);
 
-            // Wall: Observe we tile texture coordinates, and that we
-            // leave a gap in the middle for the mirror.
-            Vertex(-3.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 2.0f), // 4
-            Vertex(-3.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f),
-            Vertex(-2.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.5f, 0.0f),
-            Vertex(-2.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.5f, 2.0f),
+        std::vector<Vertex> vertices(grid.vertices.size());
+        for (int i = 0; i < vertices.size(); i++) {
+            const auto &p = grid.vertices[i].pos;
+            vertices[i].pos = p;
+            vertices[i].pos.y = GetHillHeight(p.x, p.z);
+            vertices[i].norm = GetHillNormal(p.x, p.z);
+            vertices[i].texc = grid.vertices[i].texc;
+        }
+        std::vector<uint16_t> indices = grid.GetIndices16();
 
-            Vertex(2.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 2.0f), // 8 
-            Vertex(2.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f),
-            Vertex(7.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 2.0f, 0.0f),
-            Vertex(7.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 2.0f, 2.0f),
-
-            Vertex(-3.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f), // 12
-            Vertex(-3.5f, 6.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f),
-            Vertex( 7.5f, 6.0f, 0.0f, 0.0f, 0.0f, -1.0f, 6.0f, 0.0f),
-            Vertex( 7.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 6.0f, 1.0f),
-
-            // Mirror
-            Vertex(-2.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f), // 16
-            Vertex(-2.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f),
-            Vertex( 2.5f, 4.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f),
-            Vertex( 2.5f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 1.0f)
-        };
-
-        std::array<std::int16_t, 30> indices = {
-            // Floor
-            0, 1, 2,	
-            0, 2, 3,
-
-            // Walls
-            4, 5, 6,
-            4, 6, 7,
-
-            8, 9, 10,
-            8, 10, 11,
-
-            12, 13, 14,
-            12, 14, 15,
-
-            // Mirror
-            16, 17, 18,
-            16, 18, 19
-        };
-
-        UINT vb_size = vertices.size() * sizeof(Vertex);
-        UINT ib_size = indices.size() * sizeof(uint16_t);
+        const UINT vb_size = vertices.size() * sizeof(Vertex);
+        const UINT ib_size = indices.size() * sizeof(uint16_t);
 
         auto geo = std::make_unique<MeshGeometry>();
-        geo->name = "room_geo";
-
-        ThrowIfFailed(D3DCreateBlob(vb_size, &geo->vb_cpu));
-        CopyMemory(geo->vb_cpu->GetBufferPointer(), vertices.data(), vb_size);
-        ThrowIfFailed(D3DCreateBlob(ib_size, &geo->ib_cpu));
-        CopyMemory(geo->ib_cpu->GetBufferPointer(), indices.data(), ib_size);
-
-        geo->vb_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
-            vertices.data(), vb_size, geo->vb_uploader);
-        geo->ib_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
-            indices.data(), ib_size, geo->ib_uploader);
-
-        geo->vb_stride = sizeof(Vertex);
-        geo->vb_size = vb_size;
-        geo->index_fmt = DXGI_FORMAT_R16_UINT;
-        geo->ib_size = ib_size;
-
-        SubmeshGeometry floor_submesh;
-        floor_submesh.n_index = 6;
-        floor_submesh.start_index = 0;
-        floor_submesh.base_vertex = 0;
-        geo->draw_args["floor"] = floor_submesh;
-
-        SubmeshGeometry wall_submesh;
-        wall_submesh.n_index = 18;
-        wall_submesh.start_index = 6;
-        wall_submesh.base_vertex = 0;
-        geo->draw_args["wall"] = wall_submesh;
-
-        SubmeshGeometry mirror_submesh;
-        mirror_submesh.n_index = 6;
-        mirror_submesh.start_index = 24;
-        mirror_submesh.base_vertex = 0;
-        geo->draw_args["mirror"] = mirror_submesh;
-
-        geometries[geo->name] = std::move(geo);
-    }
-    void BuildSkullGeometry() {
-        std::ifstream fin(root_path + L"models/skull.txt");
-        if (!fin) {
-            MessageBox(nullptr, L"skull.txt not found", nullptr, 0);
-            return;
-        }
-
-        int n_vertex, n_triangle;
-        std::string ignore;
-        fin >> ignore >> n_vertex;
-        fin >> ignore >> n_triangle;
-        fin >> ignore >> ignore >> ignore >> ignore;
-
-        std::vector<Vertex> vertices(n_vertex);
-        for (int i = 0; i < n_vertex; i++) {
-            fin >> vertices[i].pos.x >> vertices[i].pos.y >> vertices[i].pos.z;
-            fin >> vertices[i].norm.x >> vertices[i].norm.y >> vertices[i].norm.z;
-            vertices[i].texc = { 0.0f, 0.0f };
-        }
-
-        fin >> ignore >> ignore >> ignore;
-        std::vector<uint16_t> indices(n_triangle * 3);
-        for (int i = 0; i < n_triangle; i++) {
-            fin >> indices[3 * i] >> indices[3 * i + 1] >> indices[3 * i + 2];
-        }
-        fin.close();
-
-        UINT vb_size = vertices.size() * sizeof(Vertex);
-        UINT ib_size = indices.size() * sizeof(uint16_t);
-
-        auto geo = std::make_unique<MeshGeometry>();
-        geo->name = "skull_geo";
+        geo->name = "land_geo";
 
         ThrowIfFailed(D3DCreateBlob(vb_size, &geo->vb_cpu));
         CopyMemory(geo->vb_cpu->GetBufferPointer(), vertices.data(), vb_size);
@@ -646,54 +529,192 @@ class D3DAppStenciling : public D3DApp {
         submesh.n_index = indices.size();
         submesh.start_index = 0;
         submesh.base_vertex = 0;
-        geo->draw_args["skull"] = submesh;
+        geo->draw_args["grid"] = submesh;
+
+        geometries[geo->name] = std::move(geo);
+    }
+    void BuildWaveGeometryBuffers() {
+        std::vector<uint16_t> indices(3 * p_wave->TriangleCount());
+        assert(p_wave->VertexCount() < 0x0000ffff);
+
+        // Iterate over each quad.
+        int m = p_wave->RowCount();
+        int n = p_wave->ColumnCount();
+        int k = 0;
+        for (int i = 0; i < m - 1; i++) {
+            for (int j = 0; j < n - 1; j++) {
+                indices[k] = i * n + j;
+                indices[k + 1] = i * n + j + 1;
+                indices[k + 2] = (i + 1) * n + j;
+                indices[k + 3] = (i + 1) * n + j;
+                indices[k + 4] = i * n + j + 1;
+                indices[k + 5] = (i + 1) * n + j + 1;
+                k += 6;
+            }
+        }
+
+        UINT vb_size = p_wave->VertexCount() * sizeof(Vertex);
+        UINT ib_size = indices.size() * sizeof(uint16_t);
+
+        auto geo = std::make_unique<MeshGeometry>();
+        geo->name = "water_geo";
+
+        // Set dynamically.
+        geo->vb_cpu = nullptr;
+        geo->vb_gpu = nullptr;
+
+        ThrowIfFailed(D3DCreateBlob(ib_size, &geo->ib_cpu));
+        CopyMemory(geo->ib_cpu->GetBufferPointer(), indices.data(), ib_size);
+
+        geo->ib_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
+            indices.data(), ib_size, geo->ib_uploader);
+
+        geo->vb_stride = sizeof(Vertex);
+        geo->vb_size = vb_size;
+        geo->index_fmt = DXGI_FORMAT_R16_UINT;
+        geo->ib_size = ib_size;
+
+        SubmeshGeometry submesh;
+        submesh.n_index = indices.size();
+        submesh.start_index = 0;
+        submesh.base_vertex = 0;
+        geo->draw_args["grid"] = submesh;
+
+        geometries[geo->name] = std::move(geo);
+    }
+    void BuildBoxGeometry() {
+        GeometryGenerator geo_gen;
+        GeometryGenerator::MeshData box = geo_gen.Box(8.0f, 8.0f, 8.0f, 3);
+
+        std::vector<Vertex> vertices(box.vertices.size());
+        for (int i = 0; i < vertices.size(); i++) {
+            vertices[i].pos = box.vertices[i].pos;
+            vertices[i].norm = box.vertices[i].norm;
+            vertices[i].texc = box.vertices[i].texc;
+        }
+        std::vector<uint16_t> indices = box.GetIndices16();
+
+        UINT vb_size = vertices.size() * sizeof(Vertex);
+        UINT ib_size = indices.size() * sizeof(uint16_t);
+
+        auto geo = std::make_unique<MeshGeometry>();
+        geo->name = "box_geo";
+
+        ThrowIfFailed(D3DCreateBlob(vb_size, &geo->vb_cpu));
+        CopyMemory(geo->vb_cpu->GetBufferPointer(), vertices.data(), vb_size);
+        ThrowIfFailed(D3DCreateBlob(ib_size, &geo->ib_cpu));
+        CopyMemory(geo->ib_cpu->GetBufferPointer(), indices.data(), ib_size);
+
+        geo->vb_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
+            vertices.data(), vb_size, geo->vb_uploader);
+        geo->ib_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
+            indices.data(), ib_size, geo->ib_uploader);
+
+        geo->vb_stride = sizeof(Vertex);
+        geo->vb_size = vb_size;
+        geo->index_fmt = DXGI_FORMAT_R16_UINT;
+        geo->ib_size = ib_size;
+
+        SubmeshGeometry submesh;
+        submesh.n_index = indices.size();
+        submesh.start_index = 0;
+        submesh.base_vertex = 0;
+        geo->draw_args["box"] = submesh;
+
+        geometries[geo->name] = std::move(geo);
+    }
+    void BuildTreeSpriteGeometry() {
+        struct TreeSpriteVertex {
+            XMFLOAT3 pos;
+            XMFLOAT2 size;
+        };
+        const int n_tree = 16;
+        std::array<TreeSpriteVertex, n_tree> vertices;
+        for (int i = 0; i < n_tree; i++) {
+            float x = DXMath::RandF(-45.0f, 45.0f);
+            float z = DXMath::RandF(-45.0f, 45.0f);
+            float y = GetHillHeight(x, z) + 8.0f;
+            vertices[i].pos = { x, y, z };
+            vertices[i].size = { 20.0f, 20.0f };
+        }
+        std::array<uint16_t, n_tree> indices = {
+            0, 1, 2, 3, 4, 5, 6, 7,
+            8, 9, 10, 11, 12, 13, 14, 15
+        };
+
+        UINT vb_size = vertices.size() * sizeof(TreeSpriteVertex);
+        UINT ib_size = indices.size() * sizeof(uint16_t);
+
+        auto geo = std::make_unique<MeshGeometry>();
+        geo->name = "tree_geo";
+
+        ThrowIfFailed(D3DCreateBlob(vb_size, &geo->vb_cpu));
+        CopyMemory(geo->vb_cpu->GetBufferPointer(), vertices.data(), vb_size);
+        ThrowIfFailed(D3DCreateBlob(ib_size, &geo->ib_cpu));
+        CopyMemory(geo->ib_cpu->GetBufferPointer(), indices.data(), ib_size);
+
+        geo->vb_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
+            vertices.data(), vb_size, geo->vb_uploader);
+        geo->ib_gpu = D3DUtil::CreateDefaultBuffer(p_device.Get(), p_cmd_list.Get(),
+            indices.data(), ib_size, geo->ib_uploader);
+
+        geo->vb_stride = sizeof(TreeSpriteVertex);
+        geo->vb_size = vb_size;
+        geo->index_fmt = DXGI_FORMAT_R16_UINT;
+        geo->ib_size = ib_size;
+
+        SubmeshGeometry submesh;
+        submesh.n_index = indices.size();
+        submesh.start_index = 0;
+        submesh.base_vertex = 0;
+        geo->draw_args["tree"] = submesh;
 
         geometries[geo->name] = std::move(geo);
     }
     void BuildMaterials() {
-        auto bricks = std::make_unique<Material>();
-        bricks->name = "bricks";
-        bricks->n_frame_dirty = n_frame_resource;
-        bricks->mat_cb_ind = 0;
-        bricks->diffuse_srv_heap_index = 0;
-        bricks->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
-        bricks->fresnel_r0 = { 0.05f, 0.05f, 0.05f };
-        bricks->roughness = 0.25f;
-        materials[bricks->name] = std::move(bricks);
+        auto grass = std::make_unique<Material>();
+        grass->name = "grass";
+        grass->n_frame_dirty = n_frame_resource;
+        grass->mat_cb_ind = 0;
+        grass->diffuse_srv_heap_index = 0;
+        grass->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+        grass->fresnel_r0 = { 0.01f, 0.01f, 0.01f };
+        grass->roughness = 0.125f;
+        materials[grass->name] = std::move(grass);
 
-        auto checkboard = std::make_unique<Material>();
-        checkboard->name = "checkboard";
-        checkboard->n_frame_dirty = n_frame_resource;
-        checkboard->mat_cb_ind = 1;
-        checkboard->diffuse_srv_heap_index = 1;
-        checkboard->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
-        checkboard->fresnel_r0 = { 0.07f, 0.07f, 0.07f };
-        checkboard->roughness = 0.3f;
-        materials[checkboard->name] = std::move(checkboard);
+        auto water = std::make_unique<Material>();
+        water->name = "water";
+        water->n_frame_dirty = n_frame_resource;
+        water->mat_cb_ind = 1;
+        water->diffuse_srv_heap_index = 1;
+        water->albedo = { 1.0f, 1.0f, 1.0f, 0.5f }; // transparent water
+        water->fresnel_r0 = { 0.2f, 0.2f, 0.2f };
+        water->roughness = 0.0f;
+        materials[water->name] = std::move(water);
 
-        auto mirror = std::make_unique<Material>();
-        mirror->name = "mirror";
-        mirror->n_frame_dirty = n_frame_resource;
-        mirror->mat_cb_ind = 2;
-        mirror->diffuse_srv_heap_index = 2;
-        mirror->albedo = { 1.0f, 1.0f, 1.0f, 0.3f };
-        mirror->fresnel_r0 = { 0.1f, 0.1f, 0.1f };
-        mirror->roughness = 0.5f;
-        materials[mirror->name] = std::move(mirror);
+        auto fence = std::make_unique<Material>();
+        fence->name = "fence";
+        fence->n_frame_dirty = n_frame_resource;
+        fence->mat_cb_ind = 2;
+        fence->diffuse_srv_heap_index = 2;
+        fence->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+        fence->fresnel_r0 = { 0.1f, 0.1f, 0.1f };
+        fence->roughness = 0.25f;
+        materials[fence->name] = std::move(fence);
 
-        auto skull = std::make_unique<Material>();
-        skull->name = "skull";
-        skull->n_frame_dirty = n_frame_resource;
-        skull->mat_cb_ind = 3;
-        skull->diffuse_srv_heap_index = 3;
-        skull->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
-        skull->fresnel_r0 = { 0.05f, 0.05f, 0.05f };
-        skull->roughness = 0.3f;
-        materials[skull->name] = std::move(skull);
+        auto tree = std::make_unique<Material>();
+        tree->name = "tree";
+        tree->n_frame_dirty = n_frame_resource;
+        tree->mat_cb_ind = 3;
+        tree->diffuse_srv_heap_index = 3;
+        tree->albedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+        tree->fresnel_r0 = { 0.01f, 0.01f, 0.01f };
+        tree->roughness = 0.125f;
+        materials[tree->name] = std::move(tree);
     }
     void BuildPSOs() {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC opaque_pso_desc = {};
-        opaque_pso_desc.InputLayout = { input_layout.data(), (UINT) input_layout.size() };
+        opaque_pso_desc.InputLayout = { std_input_layout.data(), (UINT) std_input_layout.size() };
         opaque_pso_desc.pRootSignature = p_rt_sig.Get();
         opaque_pso_desc.VS = {
             reinterpret_cast<BYTE *>(shaders["standard_vs"]->GetBufferPointer()),
@@ -732,163 +753,95 @@ class D3DAppStenciling : public D3DApp {
         ThrowIfFailed(p_device->CreateGraphicsPipelineState(&transparent_pso_desc,
             IID_PPV_ARGS(&psos["transparent"])));
 
-        CD3DX12_BLEND_DESC mirror_blend_desc(D3D12_DEFAULT);
-        mirror_blend_desc.RenderTarget[0].RenderTargetWriteMask = 0;
-        D3D12_DEPTH_STENCIL_DESC mirror_ds_desc = {};
-        mirror_ds_desc.DepthEnable = true;
-        mirror_ds_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // not draw to the depth buffer
-        mirror_ds_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        mirror_ds_desc.StencilEnable = true;
-        mirror_ds_desc.StencilWriteMask = 0xff;
-        mirror_ds_desc.StencilReadMask = 0xff;
-        // stencil - fail
-        mirror_ds_desc.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-        // stencil - pass, depth - fail
-        mirror_ds_desc.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-        // stencil - pass, depth - pass
-        mirror_ds_desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
-        mirror_ds_desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-        // back face is irrelavent since back face is culled
-        mirror_ds_desc.BackFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-        mirror_ds_desc.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-        mirror_ds_desc.BackFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
-        mirror_ds_desc.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC mirror_pso_desc = opaque_pso_desc;
-        mirror_pso_desc.BlendState = mirror_blend_desc;
-        mirror_pso_desc.DepthStencilState = mirror_ds_desc;
-        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&mirror_pso_desc,
-            IID_PPV_ARGS(&psos["stencil_mirror"])));
-
-        D3D12_DEPTH_STENCIL_DESC reflect_ds_desc;
-        reflect_ds_desc.DepthEnable = true;
-        reflect_ds_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        reflect_ds_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        reflect_ds_desc.StencilEnable = true;
-        reflect_ds_desc.StencilWriteMask = 0xff;
-        reflect_ds_desc.StencilReadMask = 0xff;
-        reflect_ds_desc.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL;
-        // back face is irrelavent since back face is culled
-        reflect_ds_desc.BackFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-        reflect_ds_desc.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL;
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC reflect_pso_desc = opaque_pso_desc;
-        reflect_pso_desc.DepthStencilState = reflect_ds_desc;
-        reflect_pso_desc.RasterizerState.FrontCounterClockwise = false;
-        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&reflect_pso_desc,
-            IID_PPV_ARGS(&psos["stencil_reflect"])));
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC outline_stencil_pso_desc = mirror_pso_desc;
-        outline_stencil_pso_desc.DepthStencilState.DepthEnable = false;
-        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&outline_stencil_pso_desc,
-            IID_PPV_ARGS(&psos["outline_stencil"])));
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC outline_pso_desc = opaque_pso_desc;
-        outline_pso_desc.PS = {
-            reinterpret_cast<BYTE *>(shaders["purecolor_ps"]->GetBufferPointer()),
-            shaders["purecolor_ps"]->GetBufferSize()
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC alpha_tested_pso_desc = opaque_pso_desc;
+        alpha_tested_pso_desc.PS = {
+            reinterpret_cast<BYTE * >(shaders["alpha_tested_ps"]->GetBufferPointer()),
+            shaders["alpha_tested_ps"]->GetBufferSize()
         };
-        outline_pso_desc.DepthStencilState.DepthEnable = false;
-        outline_pso_desc.DepthStencilState.StencilEnable = true;
-        outline_pso_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL;
-        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&outline_pso_desc,
-            IID_PPV_ARGS(&psos["outline"])));
+        alpha_tested_pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&alpha_tested_pso_desc,
+            IID_PPV_ARGS(&psos["alpha_tested"])));
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC tree_sprite_pso_desc = opaque_pso_desc;
+        tree_sprite_pso_desc.InputLayout = {
+            tree_sprite_input_layout.data(),
+            (UINT) tree_sprite_input_layout.size()
+        };
+        tree_sprite_pso_desc.VS = {
+            reinterpret_cast<BYTE *>(shaders["tree_sprite_vs"]->GetBufferPointer()),
+            shaders["tree_sprite_vs"]->GetBufferSize()
+        };
+        tree_sprite_pso_desc.GS = {
+            reinterpret_cast<BYTE *>(shaders["tree_sprite_gs"]->GetBufferPointer()),
+            shaders["tree_sprite_gs"]->GetBufferSize()
+        };
+        tree_sprite_pso_desc.PS = {
+            reinterpret_cast<BYTE *>(shaders["tree_sprite_ps"]->GetBufferPointer()),
+            shaders["tree_sprite_ps"]->GetBufferSize()
+        };
+        tree_sprite_pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+        tree_sprite_pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        ThrowIfFailed(p_device->CreateGraphicsPipelineState(&tree_sprite_pso_desc,
+            IID_PPV_ARGS(&psos["tree_sprite"])));
     }
     void BuildFrameResources() {
         for (int i = 0; i < n_frame_resource; i++) {
-            frame_resources.push_back(std::make_unique<FrameResource>(p_device.Get(), 2,
-                items.size(), materials.size()));
+            frame_resources.push_back(std::make_unique<FrameResource>(p_device.Get(), 1,
+                items.size(), materials.size(), p_wave->VertexCount()));
         }
     }
     void BuildRenderItems() {
         int obj_cb_ind = 0;
 
-        auto floor_ritem = std::make_unique<RenderItem>();
-        floor_ritem->model = DXMath::Identity4x4();
-        floor_ritem->tex_transform = DXMath::Identity4x4();
-        floor_ritem->obj_cb_ind = obj_cb_ind++;
-        floor_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        floor_ritem->mat = materials["checkboard"].get();
-        floor_ritem->geo = geometries["room_geo"].get();
-        floor_ritem->n_index = floor_ritem->geo->draw_args["floor"].n_index;
-        floor_ritem->start_index = floor_ritem->geo->draw_args["floor"].start_index;
-        floor_ritem->base_vertex = floor_ritem->geo->draw_args["floor"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Opaque].push_back(floor_ritem.get());
-        items.push_back(std::move(floor_ritem));
+        auto grid_ritem = std::make_unique<RenderItem>();
+        grid_ritem->model = DXMath::Identity4x4();
+        XMStoreFloat4x4(&grid_ritem->tex_transform, XMMatrixScaling(5.0f, 5.0f, 1.0f));
+        grid_ritem->obj_cb_ind = obj_cb_ind++;
+        grid_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        grid_ritem->mat = materials["grass"].get();
+        grid_ritem->geo = geometries["land_geo"].get();
+        grid_ritem->n_index = grid_ritem->geo->draw_args["grid"].n_index;
+        grid_ritem->start_index = grid_ritem->geo->draw_args["grid"].start_index;
+        grid_ritem->base_vertex = grid_ritem->geo->draw_args["grid"].base_vertex;
+        ritem_layer[(size_t) RenderLayor::Opaque].push_back(grid_ritem.get());
+        items.push_back(std::move(grid_ritem));
 
-        auto reflect_floor_ritem = std::make_unique<RenderItem>();
-        XMMATRIX reflect = XMMatrixReflect(XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
-        XMStoreFloat4x4(&reflect_floor_ritem->model, reflect);
-        reflect_floor_ritem->tex_transform = DXMath::Identity4x4();
-        reflect_floor_ritem->obj_cb_ind = obj_cb_ind++;
-        reflect_floor_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        reflect_floor_ritem->mat = materials["checkboard"].get();
-        reflect_floor_ritem->geo = geometries["room_geo"].get();
-        reflect_floor_ritem->n_index = reflect_floor_ritem->geo->draw_args["floor"].n_index;
-        reflect_floor_ritem->start_index = reflect_floor_ritem->geo->draw_args["floor"].start_index;
-        reflect_floor_ritem->base_vertex = reflect_floor_ritem->geo->draw_args["floor"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Reflected].push_back(reflect_floor_ritem.get());
-        items.push_back(std::move(reflect_floor_ritem));
+        auto wave_ritem = std::make_unique<RenderItem>();
+        wave_ritem->model = DXMath::Identity4x4();
+        XMStoreFloat4x4(&wave_ritem->tex_transform, XMMatrixScaling(5.0f, 5.0f, 1.0f));
+        wave_ritem->obj_cb_ind = obj_cb_ind++;
+        wave_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        wave_ritem->mat = materials["water"].get();
+        wave_ritem->geo = geometries["water_geo"].get();
+        wave_ritem->n_index = wave_ritem->geo->draw_args["grid"].n_index;
+        wave_ritem->start_index = wave_ritem->geo->draw_args["grid"].start_index;
+        wave_ritem->base_vertex = wave_ritem->geo->draw_args["grid"].base_vertex;
+        ritem_layer[(size_t) RenderLayor::Transparent].push_back(wave_ritem.get());
+        this->wave_ritem = wave_ritem.get();
+        items.push_back(std::move(wave_ritem));
 
-        auto wall_ritem = std::make_unique<RenderItem>();
-        wall_ritem->model = DXMath::Identity4x4();
-        wall_ritem->tex_transform = DXMath::Identity4x4();
-        wall_ritem->obj_cb_ind = obj_cb_ind++;
-        wall_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        wall_ritem->mat = materials["bricks"].get();
-        wall_ritem->geo = geometries["room_geo"].get();
-        wall_ritem->n_index = wall_ritem->geo->draw_args["wall"].n_index;
-        wall_ritem->start_index = wall_ritem->geo->draw_args["wall"].start_index;
-        wall_ritem->base_vertex = wall_ritem->geo->draw_args["wall"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Opaque].push_back(wall_ritem.get());
-        items.push_back(std::move(wall_ritem));
+        auto crate_ritem = std::make_unique<RenderItem>();
+        XMStoreFloat4x4(&crate_ritem->model, XMMatrixTranslation(3.0f, 2.0f, -9.0f));
+        crate_ritem->obj_cb_ind = obj_cb_ind++;
+        crate_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        crate_ritem->mat = materials["fence"].get();
+        crate_ritem->geo = geometries["box_geo"].get();
+        crate_ritem->n_index = crate_ritem->geo->draw_args["box"].n_index;
+        crate_ritem->start_index = crate_ritem->geo->draw_args["box"].start_index;
+        crate_ritem->base_vertex = crate_ritem->geo->draw_args["box"].base_vertex;
+        ritem_layer[(size_t) RenderLayor::AlphaTested].push_back(crate_ritem.get());
+        items.push_back(std::move(crate_ritem));
 
-        auto skull_ritem = std::make_unique<RenderItem>();
-        skull_ritem->model = DXMath::Identity4x4(); // will be set in 'OnKeyboardInput()'
-        skull_ritem->tex_transform = DXMath::Identity4x4();
-        skull_ritem->obj_cb_ind = obj_cb_ind++;
-        skull_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        skull_ritem->mat = materials["skull"].get();
-        skull_ritem->geo = geometries["skull_geo"].get();
-        skull_ritem->n_index = skull_ritem->geo->draw_args["skull"].n_index;
-        skull_ritem->start_index = skull_ritem->geo->draw_args["skull"].start_index;
-        skull_ritem->base_vertex = skull_ritem->geo->draw_args["skull"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Opaque].push_back(skull_ritem.get());
-        ritem_layer[(size_t) RenderLayor::OutlineStencil].push_back(skull_ritem.get());
-        p_skull_ritem = skull_ritem.get();
-
-        auto reflect_skull_ritem = std::make_unique<RenderItem>();
-        *reflect_skull_ritem = *skull_ritem;
-        reflect_skull_ritem->obj_cb_ind = obj_cb_ind++;
-        ritem_layer[(size_t) RenderLayor::Reflected].push_back(reflect_skull_ritem.get());
-        p_reflected_skull_ritem = reflect_skull_ritem.get();
-
-        auto outline_skull_ritem = std::make_unique<RenderItem>();
-        *outline_skull_ritem = *skull_ritem;
-        outline_skull_ritem->obj_cb_ind = obj_cb_ind++;
-        ritem_layer[(size_t) RenderLayor::Outline].push_back(outline_skull_ritem.get());
-        p_outline_skull_ritem = outline_skull_ritem.get();
-
-        items.push_back(std::move(outline_skull_ritem));
-        items.push_back(std::move(reflect_skull_ritem));
-        items.push_back(std::move(skull_ritem));
-
-        auto mirror_ritem = std::make_unique<RenderItem>();
-        mirror_ritem->model = DXMath::Identity4x4();
-        mirror_ritem->tex_transform = DXMath::Identity4x4();
-        mirror_ritem->obj_cb_ind = obj_cb_ind++;
-        mirror_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        mirror_ritem->mat = materials["mirror"].get();
-        mirror_ritem->geo = geometries["room_geo"].get();
-        mirror_ritem->n_index = mirror_ritem->geo->draw_args["mirror"].n_index;
-        mirror_ritem->start_index = mirror_ritem->geo->draw_args["mirror"].start_index;
-        mirror_ritem->base_vertex = mirror_ritem->geo->draw_args["mirrpr"].base_vertex;
-        ritem_layer[(size_t) RenderLayor::Mirror].push_back(mirror_ritem.get());
-        ritem_layer[(size_t) RenderLayor::Transparent].push_back(mirror_ritem.get());
-        items.push_back(std::move(mirror_ritem));
+        auto tree_ritem = std::make_unique<RenderItem>();
+        tree_ritem->obj_cb_ind = obj_cb_ind++;
+        tree_ritem->prim_ty = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+        tree_ritem->mat = materials["tree"].get();
+        tree_ritem->geo = geometries["tree_geo"].get();
+        tree_ritem->n_index = tree_ritem->geo->draw_args["tree"].n_index;
+        tree_ritem->start_index = tree_ritem->geo->draw_args["tree"].start_index;
+        tree_ritem->base_vertex = tree_ritem->geo->draw_args["tree"].base_vertex;
+        ritem_layer[(size_t) RenderLayor::Sprites].push_back(tree_ritem.get());
+        items.push_back(std::move(tree_ritem));
     }
 
     void DrawRenderItems(ID3D12GraphicsCommandList *cmd_list, const std::vector<RenderItem *> &items) {
@@ -919,6 +872,21 @@ class D3DAppStenciling : public D3DApp {
             cmd_list->DrawIndexedInstanced(item->n_index, 1, item->start_index, item->base_vertex, 0);
         }
     }
+    
+    float GetHillHeight(float x, float z) const {
+        return 0.3f * (z * std::sin(0.1f * x) + x * std::cos(0.1f * z));
+    }
+    XMFLOAT3 GetHillNormal(float x, float z) const {
+        // n = (-df/dx, 1, -df/dz)
+        XMFLOAT3 norm(
+            -0.03f * z * std::cos(0.1f * x) - 0.3f * std::cosf(0.1f * z),
+            1.0f,
+            -0.3f * std::sin(0.1f * x) + 0.03f * x * std::sin(0.1f * z)
+        );
+
+        XMStoreFloat3(&norm, XMVector3Normalize(XMLoadFloat3(&norm)));
+        return norm;
+    }
 
     std::vector<std::unique_ptr<FrameResource>> frame_resources;
     FrameResource *curr_fr = nullptr;
@@ -933,28 +901,23 @@ class D3DAppStenciling : public D3DApp {
     std::unordered_map<std::string, ComPtr<ID3DBlob>> shaders;
     std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> psos;
 
-    std::vector<D3D12_INPUT_ELEMENT_DESC> input_layout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> std_input_layout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> tree_sprite_input_layout;
 
     std::vector<std::unique_ptr<RenderItem>> items;
+    RenderItem *wave_ritem;
     std::vector<RenderItem *> ritem_layer[(size_t) RenderLayor::Count];
-    RenderItem *p_skull_ritem = nullptr;
-    RenderItem *p_reflected_skull_ritem = nullptr;
-    RenderItem *p_outline_skull_ritem = nullptr;
-
-    XMFLOAT3 skull_translation = { 0.0f, 1.0f, -5.0f };
-
-    bool b_outline = false;
+    std::unique_ptr<Wave> p_wave;
 
     PassConst main_pass_cb;
-    PassConst reflected_pass_cb;
 
     XMFLOAT3 eye = { 0.0f, 0.0f, 0.0f };
     XMFLOAT4X4 view = DXMath::Identity4x4();
     XMFLOAT4X4 proj = DXMath::Identity4x4();
 
-    float theta = 1.25 * XM_PI;
-    float phi = XM_PIDIV4;
-    float radius = 20.0f;
+    float theta = 0.0f;
+    float phi = XM_PIDIV2;
+    float radius = 25.0f;
 
     POINT last_mouse;
 };
@@ -965,7 +928,7 @@ int WINAPI WinMain(HINSTANCE h_inst, HINSTANCE h_prev_inst, PSTR cmd_line, int s
 #endif
 
     try {
-        D3DAppStenciling d3d_app(h_inst);
+        D3DAppBillboard d3d_app(h_inst);
         if (!d3d_app.Initialize()) {
             return 0;
         }
