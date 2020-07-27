@@ -13,6 +13,7 @@
 #include "GeometryGenerator.h"
 #include "FrameResource.h"
 #include "Wave.h"
+#include "BlurFilter.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -42,10 +43,12 @@ enum class RenderLayor : size_t {
     Count
 };
 
-class D3DAppGpuWave : public D3DApp {
+// do blur by copying render-target to resource in BlurFilter and then copying back
+
+class D3DAppBlur : public D3DApp {
   public:
-    D3DAppGpuWave(HINSTANCE h_inst) : D3DApp(h_inst) {}
-    ~D3DAppGpuWave() {
+    D3DAppBlur(HINSTANCE h_inst) : D3DApp(h_inst) {}
+    ~D3DAppBlur() {
         if (p_device != nullptr) {
             FlushCommandQueue();
         }
@@ -58,12 +61,13 @@ class D3DAppGpuWave : public D3DApp {
 
         ThrowIfFailed(p_cmd_list->Reset(p_cmd_allocator.Get(), nullptr));
 
-        // p_cmd_list is used in constructor of Wave, so this stmt is pushed after p_cmd_list->Reset()
         p_wave = std::make_unique<Wave>(p_device.Get(), p_cmd_list.Get(), 128, 128, 1.0f, 0.03f, 4.0f, 0.2f);
+        p_blur_filter = std::make_unique<BlurFilter>(p_device.Get(), client_width, client_height, back_buffer_fmt);
 
         LoadTextures();
         BuildRootSignature();
         BuildWaveRootSignature();
+        BuildPostRootSignature();
         BuildDescriptorHeaps();
         BuildShaderAndInputLayout();
         BuildLandGeometry();
@@ -87,6 +91,9 @@ class D3DAppGpuWave : public D3DApp {
         D3DApp::OnResize();
         XMMATRIX _proj = XMMatrixPerspectiveFovRH(XM_PIDIV4, Aspect(), 0.1f, 1000.0f);
         XMStoreFloat4x4(&proj, _proj);
+        if (p_blur_filter) {
+            p_blur_filter->OnResize(client_width, client_height);
+        }
     }
     void Update(const Timer &timer) override {
         OnKeyboardInput(timer);
@@ -157,10 +164,16 @@ class D3DAppGpuWave : public D3DApp {
         p_cmd_list->SetPipelineState(psos["gpu_wave"].Get());
         DrawRenderItems(p_cmd_list.Get(), ritem_layer[(size_t) RenderLayor::GpuWave]);
 
-        // back buffer: render target -> present
-        D3D12_RESOURCE_BARRIER rt2present = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-        p_cmd_list->ResourceBarrier(1, &rt2present);
+        // post process
+        p_blur_filter->Execute(p_cmd_list.Get(), p_post_rt_sig.Get(), psos["blur_hori"].Get(),
+            psos["blur_vert"].Get(), CurrBackBuffer(), 4);
+        D3D12_RESOURCE_BARRIER cpsrc2cpdst = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        p_cmd_list->ResourceBarrier(1, &cpsrc2cpdst);
+        p_cmd_list->CopyResource(CurrBackBuffer(), p_blur_filter->Output());
+        D3D12_RESOURCE_BARRIER cpdst2present = CD3DX12_RESOURCE_BARRIER::Transition(CurrBackBuffer(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        p_cmd_list->ResourceBarrier(1, &cpdst2present);
         
         // close & begin execution
         ThrowIfFailed(p_cmd_list->Close());
@@ -430,9 +443,33 @@ class D3DAppGpuWave : public D3DApp {
         ThrowIfFailed(p_device->CreateRootSignature(0, serialized_rt_sig->GetBufferPointer(),
             serialized_rt_sig->GetBufferSize(), IID_PPV_ARGS(&p_wave_rt_sig)));
     }
+    void BuildPostRootSignature() {
+        CD3DX12_ROOT_PARAMETER rt_params[3];
+        rt_params[0].InitAsConstants(12, 0);
+        CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        rt_params[1].InitAsDescriptorTable(1, &srv_range);
+        CD3DX12_DESCRIPTOR_RANGE uav_range(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+        rt_params[2].InitAsDescriptorTable(1, &uav_range);
+
+        CD3DX12_ROOT_SIGNATURE_DESC rt_sig_desc(sizeof(rt_params) / sizeof(rt_params[0]), rt_params,
+            0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+        ComPtr<ID3DBlob> serialized_rt_sig = nullptr;
+        ComPtr<ID3DBlob> error = nullptr;
+        HRESULT hr = D3D12SerializeRootSignature(&rt_sig_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+            &serialized_rt_sig, &error);
+        if (error != nullptr) {
+            OutputDebugStringA((char *) error->GetBufferPointer());
+        }
+        ThrowIfFailed(hr);
+
+        ThrowIfFailed(p_device->CreateRootSignature(0, serialized_rt_sig->GetBufferPointer(),
+            serialized_rt_sig->GetBufferSize(), IID_PPV_ARGS(&p_post_rt_sig)));
+    }
     void BuildDescriptorHeaps() {
         D3D12_DESCRIPTOR_HEAP_DESC srv_heap_desc = {};
-        srv_heap_desc.NumDescriptors = textures.size() + p_wave->DescriptorCount();
+        srv_heap_desc.NumDescriptors = textures.size() + p_wave->DescriptorCount() +
+            p_blur_filter->DescriptorCount();
         srv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ThrowIfFailed(p_device->CreateDescriptorHeap(&srv_heap_desc, IID_PPV_ARGS(&p_cbv_srv_uav_heap)));
@@ -464,6 +501,13 @@ class D3DAppGpuWave : public D3DApp {
             CD3DX12_GPU_DESCRIPTOR_HANDLE(p_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart(),
                 textures.size(), cbv_srv_uav_descriptor_size),
             cbv_srv_uav_descriptor_size);
+
+        p_blur_filter->BuildDescriptors(
+            CD3DX12_CPU_DESCRIPTOR_HANDLE(p_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart(),
+                textures.size() + p_wave->DescriptorCount(), cbv_srv_uav_descriptor_size),
+            CD3DX12_GPU_DESCRIPTOR_HANDLE(p_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart(),
+                textures.size() + p_wave->DescriptorCount(), cbv_srv_uav_descriptor_size),
+            cbv_srv_uav_descriptor_size);
     }
     void BuildShaderAndInputLayout() {
         // defines
@@ -482,18 +526,22 @@ class D3DAppGpuWave : public D3DApp {
         };
 
         // build shader from hlsl file
-        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/P3N3U2_default.hlsl",
+        shaders["standard_vs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/P3N3U2_default.hlsl",
             nullptr, "VS", "vs_5_1");
-        shaders["displacement_vs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/P3N3U2_default.hlsl",
+        shaders["displacement_vs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/P3N3U2_default.hlsl",
             displacement_defines, "VS", "vs_5_1");
-        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/P3N3U2_default.hlsl",
+        shaders["opaque_ps"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/P3N3U2_default.hlsl",
             fog_defines, "PS", "ps_5_1");
-        shaders["alpha_tested_ps"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/P3N3U2_default.hlsl",
+        shaders["alpha_tested_ps"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/P3N3U2_default.hlsl",
             alpha_test_defines, "PS", "ps_5_1");
-        shaders["wave_update_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/wave.hlsl",
+        shaders["wave_update_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/wave.hlsl",
             nullptr, "UpdateWaveCS", "cs_5_1");
-        shaders["wave_disturb_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_wave/shaders/wave.hlsl",
+        shaders["wave_disturb_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/wave.hlsl",
             nullptr, "DisturbCS", "cs_5_1");
+        shaders["blur_hori_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/blur.hlsl",
+            nullptr, "HoriBlurCS", "cs_5_1");
+        shaders["blur_vert_cs"] = D3DUtil::CompileShader(src_path + L"ch13_cs_blur/shaders/blur.hlsl",
+            nullptr, "VertBlurCS", "cs_5_1");
 
         // input layout and input elements specify input of (vertex) shader
         input_layout = {
@@ -735,6 +783,24 @@ class D3DAppGpuWave : public D3DApp {
         };
         ThrowIfFailed(p_device->CreateComputePipelineState(&wave_disturb_pso_desc,
             IID_PPV_ARGS(&psos["wave_disturb"])));
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC blur_hori_pso_desc = {};
+        blur_hori_pso_desc.CS = {
+            reinterpret_cast<BYTE *>(shaders["blur_hori_cs"]->GetBufferPointer()),
+            shaders["blur_hori_cs"]->GetBufferSize()
+        };
+        blur_hori_pso_desc.pRootSignature = p_post_rt_sig.Get();
+        blur_hori_pso_desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+        ThrowIfFailed(p_device->CreateComputePipelineState(&blur_hori_pso_desc,
+            IID_PPV_ARGS(&psos["blur_hori"])));
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC blur_vert_pso_desc = blur_hori_pso_desc;
+        blur_vert_pso_desc.CS = {
+            reinterpret_cast<BYTE *>(shaders["blur_vert_cs"]->GetBufferPointer()),
+            shaders["blur_vert_cs"]->GetBufferSize()
+        };
+        ThrowIfFailed(p_device->CreateComputePipelineState(&blur_vert_pso_desc,
+            IID_PPV_ARGS(&psos["blur_vert"])));
     }
     void BuildFrameResources() {
         for (int i = 0; i < n_frame_resource; i++) {
@@ -836,6 +902,7 @@ class D3DAppGpuWave : public D3DApp {
 
     ComPtr<ID3D12RootSignature> p_rt_sig = nullptr;
     ComPtr<ID3D12RootSignature> p_wave_rt_sig = nullptr;
+    ComPtr<ID3D12RootSignature> p_post_rt_sig = nullptr;
     ComPtr<ID3D12DescriptorHeap> p_cbv_srv_uav_heap;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> geometries;
@@ -849,6 +916,7 @@ class D3DAppGpuWave : public D3DApp {
     std::vector<std::unique_ptr<RenderItem>> items;
     std::vector<RenderItem *> ritem_layer[(size_t) RenderLayor::Count];
     std::unique_ptr<Wave> p_wave;
+    std::unique_ptr<BlurFilter> p_blur_filter;
 
     PassConst main_pass_cb;
 
@@ -869,7 +937,7 @@ int WINAPI WinMain(HINSTANCE h_inst, HINSTANCE h_prev_inst, PSTR cmd_line, int s
 #endif
 
     try {
-        D3DAppGpuWave d3d_app(h_inst);
+        D3DAppBlur d3d_app(h_inst);
         if (!d3d_app.Initialize()) {
             return 0;
         }
