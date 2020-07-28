@@ -1,7 +1,4 @@
 #include "BlurFilter.h"
-#include <d3d12.h>
-#include <debugapi.h>
-#include <string>
 
 #ifdef min
 #undef min
