@@ -925,8 +925,8 @@ class D3DAppSobel : public D3DApp {
     void DrawScreenQuad(ID3D12GraphicsCommandList *cmd_list) {
         cmd_list->IASetVertexBuffers(0, 1, nullptr);
         cmd_list->IASetIndexBuffer(nullptr);
-        cmd_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd_list->DrawInstanced(6, 1, 0, 0);
+        cmd_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        cmd_list->DrawInstanced(4, 1, 0, 0);
     }
     
     float GetHillHeight(float x, float z) const {

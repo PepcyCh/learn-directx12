@@ -8,12 +8,10 @@ SamplerState sam_linear_clamp : register(s3);
 SamplerState sam_aniso_wrap : register(s4);
 SamplerState sam_aniso_clamp : register(s5);
 
-static const float2 texc[6] = {
+static const float2 texc[4] = {
     float2(0.0f, 0.0f),
     float2(0.0f, 1.0f),
     float2(1.0f, 0.0f),
-    float2(1.0f, 0.0f),
-    float2(0.0f, 1.0f),
     float2(1.0f, 1.0f)
 };
 
