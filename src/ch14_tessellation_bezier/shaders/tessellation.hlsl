@@ -76,16 +76,10 @@ struct PatchTess {
     float inside_tess[2] : SV_InsideTessFactor;
 };
 
-PatchTess ConstHS(InputPatch<VertexOut, 4> patch, uint pid : SV_PrimitiveID) {
+PatchTess ConstHS(InputPatch<VertexOut, 16> patch, uint pid : SV_PrimitiveID) {
     PatchTess pt;
 
-    float3 center = 0.25f * (patch[0].pos + patch[1].pos, patch[2].pos, patch[3].pos);
-    center = mul(model, float4(center, 1.0f));
-    float dist = distance(center, eye);
-
-    const float d0 = 20.0f;
-    const float d1 = 100.0f;
-    float tess = 63.0f * saturate((d1 - dist) / (d1 - d0)) + 1.0f;
+    float tess = 25.0f;
 
     pt.edge_tess[0] = tess;
     pt.edge_tess[1] = tess;
@@ -104,13 +98,11 @@ struct HullOut {
 
 [domain("quad")]
 [partitioning("integer")]
-// [partitioning("fractional_odd")]
-// [partitioning("fractional_even")]
 [outputtopology("triangle_cw")]
-[outputcontrolpoints(4)]
+[outputcontrolpoints(16)]
 [patchconstantfunc("ConstHS")]
 [maxtessfactor(64.0f)]
-HullOut HS(InputPatch<VertexOut, 4> patch, uint i : SV_OutputControlPointID, uint pid : SV_PrimitiveID) {
+HullOut HS(InputPatch<VertexOut, 16> patch, uint i : SV_OutputControlPointID, uint pid : SV_PrimitiveID) {
     HullOut hout;
     hout.pos = patch[i].pos;
     return hout;
@@ -123,20 +115,47 @@ struct DomainOut {
     float2 texc : TEXCOORD;
 };
 
+float4 BernsteinBasic(float t) {
+    float it = 1.0f - t;
+    return float4(it * it * it, 3.0f * it * it * t, 3.0f * it * t * t, t * t * t);
+}
+
+float4 DBernsteinBasic(float t) {
+    float it = 1.0f - t;
+    return float4(-3 * it * it, 3 * it * it - 6 * it * t, 6 * t * it - 3 * t * t, 3 * t * t);
+}
+
+float3 CubizBezierSum(const OutputPatch<HullOut, 16> patch, float4 basic_u, float4 basic_v) {
+    float3 sum = float3(0.0f, 0.0f, 0.0f);
+    sum = basic_v.x *(basic_u.x * patch[0].pos + basic_u.y * patch[1].pos + basic_u.z * patch[2].pos +
+        basic_u.w * patch[3].pos);
+    sum += basic_v.y *(basic_u.x * patch[4].pos + basic_u.y * patch[5].pos + basic_u.z * patch[6].pos +
+        basic_u.w * patch[7].pos);
+    sum += basic_v.z *(basic_u.x * patch[8].pos + basic_u.y * patch[9].pos + basic_u.z * patch[10].pos +
+        basic_u.w * patch[11].pos);
+    sum += basic_v.w *(basic_u.x * patch[12].pos + basic_u.y * patch[13].pos + basic_u.z * patch[14].pos +
+        basic_u.w * patch[15].pos);
+    return sum;
+}
+
 [domain("quad")]
-DomainOut DS(PatchTess pt, float2 uv : SV_DomainLocation, const OutputPatch<HullOut, 4> patch) {
+DomainOut DS(PatchTess pt, float2 uv : SV_DomainLocation, const OutputPatch<HullOut, 16> patch) {
     DomainOut dout;
 
-    float3 v0 = lerp(patch[0].pos, patch[1].pos, uv.x);
-    float3 v1 = lerp(patch[2].pos, patch[3].pos, uv.x);
-    float3 p = lerp(v0, v1, uv.y);
+    float4 basic_u = BernsteinBasic(uv.x);
+    float4 basic_v = BernsteinBasic(uv.y);
 
-    p.y = 0.3f * (p.z * sin(p.x) + p.x * cos(p.z));
-    float4 pos_w = mul(model, float4(p, 1.0f));
+    float4 d_basic_u = DBernsteinBasic(uv.x);
+    float4 d_basic_v = DBernsteinBasic(uv.y);
+
+    float3 pos = CubizBezierSum(patch, basic_u, basic_v);
+    float3 dpdu = CubizBezierSum(patch, d_basic_u, basic_v);
+    float3 dpdv = CubizBezierSum(patch, basic_u, d_basic_v);
+
+    float4 pos_w = mul(model, float4(pos, 1.0f));
     dout.pos_w = pos_w;
     dout.pos = mul(vp, pos_w);
-    dout.norm_w = normalize(float3(-0.3f * p.z * cos(p.x) - 0.3f * cos(p.z), 1.0f,
-        -0.3f * sin(p.x) + 0.3f * p.x * sin(p.z)));
+    dout.norm_w = cross(normalize(dpdu), normalize(dpdv));
     dout.texc = uv;
 
     return dout;
