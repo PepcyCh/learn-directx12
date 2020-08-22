@@ -12,7 +12,7 @@ class GeometryGenerator {
         Vertex(const DirectX::XMFLOAT3 &p, const DirectX::XMFLOAT3 &n, const DirectX::XMFLOAT3 &t,
             const DirectX::XMFLOAT2 &uv) : pos(p), norm(n), tan(t), texc(uv) {}
         Vertex(float px, float py, float pz, float nx, float ny, float nz, float tx, float ty, float tz,
-            float u, float v) : pos(px, py, pz), norm(nx, ny, nz), tan(nx, ny, nz), texc(u, v) {}
+            float u, float v) : pos(px, py, pz), norm(nx, ny, nz), tan(tx, ty, tz), texc(u, v) {}
 
         DirectX::XMFLOAT3 pos;
         DirectX::XMFLOAT3 norm;
